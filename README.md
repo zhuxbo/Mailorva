@@ -117,6 +117,8 @@ bash scripts/build-macos-search.sh
 
 ## 验证与开发
 
+依赖由维护者按需手动更新，仓库不启用 Dependabot 自动更新。
+
 ```bash
 cargo fmt --manifest-path server/Cargo.toml --check
 cargo clippy --manifest-path server/Cargo.toml --all-targets -- -D warnings
