@@ -81,7 +81,7 @@ http://192.168.1.10:8080 {
 
 Android 和 macOS 各自只保存一个访问令牌：只读令牌仅能搜索，可写令牌可简单回复，macOS 可写令牌还可管理邮箱。服务器仍配置两份不同的令牌；AI 需要写操作时使用可写令牌。App 修改账户立即生效，不需重启；改变访问令牌、监听地址或全局同步配置后重启服务。
 
-## 单用户只读 OAuth
+## 单用户 OAuth
 
 默认 `oauth: null`，不影响现有只读/可写 Bearer 令牌。需要接入 ChatGPT 等 OAuth 客户端时，在同一服务中启用单用户授权；不需要邮箱提供商的 OAuth，也不把邮箱密码交给助手。
 
@@ -106,7 +106,7 @@ sudo chmod 0640 /etc/ai-email/oauth-approval-secret
 
 `allowed_redirect_origins` 只填写可信助手实际回调的 HTTPS 来源（协议、主机、可选端口），不使用通配符。动态注册只能提交这些来源的回调；注册后按完整回调 URL 精确匹配。客户端标识由服务签名，无匿名注册表；服务不会抓取客户端传入的 URL。其他助手需要将其可信回调来源加入配置后重启；不支持 HTTP loopback 回调。
 
-公开路由为 `/.well-known/oauth-protected-resource`、`/.well-known/oauth-authorization-server`、`/oauth/register`、`/oauth/authorize`、`/oauth/token`、`/oauth/revoke`。它们不使用固定 Bearer 认证，实际授权仍必须通过独立口令和用户确认；MCP 邮件请求始终需要有效令牌。服务监听地址继续保持 loopback。
+公开路由为 `/.well-known/oauth-protected-resource`、`/.well-known/oauth-authorization-server`、`/oauth/register`、`/oauth/authorize`、`/oauth/token`、`/oauth/revoke`、`/oauth/replies/{id}`。它们不使用固定 Bearer 认证，实际授权仍必须通过独立口令和用户确认；MCP 邮件请求始终需要有效令牌。服务监听地址继续保持 loopback。
 
 若公网入口采用子路径（例如 `/mail-mcp/`），应让反代剥除此前缀，再将入口 `/` 重写为后端 `/mcp`，同时转发该前缀下的 OAuth 和 metadata 路由。此时 `issuer` 为 `https://mail.example.com/mail-mcp`，`resource` 为 `https://mail.example.com/mail-mcp/`。RFC 8414 发现请求从域名根发出，还需在公网 Nginx 增加精确路由（替换上游与 Host）：
 
@@ -121,11 +121,22 @@ location = /.well-known/oauth-authorization-server/mail-mcp {
 }
 ```
 
-配置 ChatGPT 自定义 MCP 时填写公网 `resource` 地址，认证选择 OAuth，使用动态注册（DCR），无需手工填写 client ID/secret。安装并连接插件，在 AI Email 授权页核对客户端名称、回调地址及只读权限后输入专用授权口令。不要将口令或访问令牌粘贴到聊天中。
+配置 ChatGPT 自定义 MCP 时填写公网 `resource` 地址，认证选择 OAuth，使用动态注册（DCR），无需手工填写 client ID/secret。安装并连接插件，在 AI Email 授权页核对客户端名称、回调地址及请求权限后输入专用授权口令。不要将口令或访问令牌粘贴到聊天中。
+
+权限默认 `mail:read`；选择 `mail:read mail:reply` 可增加回复已有邮件的能力。旧授权和刷新令牌不会自动获得回复权限，必须重新授权；刷新只能保持或缩小权限。OAuth 令牌仍不能调用 REST API，也不开放通用发送、移动、标记及邮箱管理工具。
+
+已有 ChatGPT 插件重新连接时可能沿用原来的 `mail:read` 请求，需核对实际授权页明确显示“读取和回复邮件”。授权后刷新插件工具；若 dot 仍只看到旧工具，可通过 dot 菜单重启以重新加载，对话、记忆和已安排任务会保留，但正在进行的工作可能中断。验收时应实际调用 `prepare_reply` 与 `get_reply_status`，只生成测试草稿，不确认发送。
+
+回复授权仅增加 `prepare_reply` 和 `get_reply_status`：
+
+- `prepare_reply` 提交原邮件 `id`、唯一 `operation_id`、`body_text` 及可选 `from_address`。服务端固定原账号、Reply-To（无则 From）收件人和回复主题，发件人只能是账号主地址或已配置别名；不能添加抄送或任意收件人。
+- 返回完整预览和 `confirmation_url`。助手应把链接交给用户本人；用户在独立页面核对完整内容，输入部署时生成的专用授权口令并点击“确认发送这封回复”。此点击立即发送，助手不得代为确认或获取口令。MCP 没有可绕过页面的 OAuth 发送工具。
+- 回复自准备起 30 分钟有效，页面确认凭证 10 分钟有效且一次使用。修改正文需新操作编号并重新确认；相同编号不能换内容。不同 OAuth 授权的操作互相隔离，授权撤销或过期后不能确认发送。
+- `get_reply_status` 用原 `operation_id` 查询状态；`unknown` 必须人工检查发件箱，不得自动重发。`list_accounts` 返回 `can_reply` 表示 OAuth 回复能力，`can_write` 仍为 false。
 
 访问令牌有效期为 1 小时；允许刷新时，授权最长持续 30 天，每次刷新都更换访问和刷新令牌。刷新令牌重放会撤销同一授权的全部令牌；客户端不得并发或自动重放未知结果的刷新请求。`POST /oauth/revoke` 支持客户端撤销自己的访问或刷新令牌，服务端仅保存令牌哈希。进程重启保留未到期授权；修改授权口令、issuer、resource 或回调来源配置会使原注册和授权失效，助手需要重新创建连接。禁用 OAuth 只停用入口；永久撤销所有旧授权应轮换授权口令并重启。
 
-授权页防止跨站提交和嵌入，回调必须与注册值一致，授权码最多 5 分钟且一次有效。匿名注册、授权和换令牌均有全局速率限制，超限返回 `429` 和 `Retry-After`。测试覆盖 PKCE/回调/resource 篡改、CSRF、并发兑换、过期/重放/撤销以及 MCP 只读和 REST 隔离；自动测试使用空邮箱或模拟数据。
+授权页防止跨站提交和嵌入，回调必须与注册值一致，授权码最多 5 分钟且一次有效。匿名注册、授权和换令牌均有全局速率限制，超限返回 `429` 和 `Retry-After`。测试覆盖 PKCE/回调/resource 篡改、CSRF、并发兑换、过期/重放/撤销以及 MCP 分级权限、独立确认页发送和 REST 隔离；自动测试使用空邮箱或模拟数据。
 
 公网验收需分别确认：未认证 MCP 返回带 metadata 地址的 `401`；标准发现 URL 返回正确 issuer；实际助手完成注册、浏览器授权及只读搜索。仅用脚本搜索成功不能代表 dot 接入完成。
 

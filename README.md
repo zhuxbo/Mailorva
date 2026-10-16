@@ -78,11 +78,12 @@ server/target/release/ai-email-server server/config.json
 }
 ```
 
-默认使用个人令牌；可选启用单用户 OAuth 授权，为 ChatGPT 等 OAuth 客户端提供只读 MCP 接入。OAuth 支持授权码 + S256 PKCE、受允许回调来源约束的动态客户端注册、短期访问令牌、刷新轮换和撤销；只开放列账户、搜索、读邮件和附件，不能调用 REST API、管理邮箱或执行写操作。配置及反代发现路由见 [OAuth 接入说明](ONBOARDING.md#单用户只读-oauth)。各助手仍需实际验证兼容性。
+默认使用个人令牌；可选启用单用户 OAuth 授权，为 ChatGPT 等 OAuth 客户端提供 MCP 接入。OAuth 支持授权码 + S256 PKCE、受允许回调来源约束的动态客户端注册、短期访问令牌、刷新轮换和撤销；`mail:read` 开放列账户、搜索、读邮件和附件；可另行授权 `mail:reply`，仅准备已有邮件的回复，由用户在独立确认页核对全文并输入专用口令后发送。OAuth 不能调用 REST API、管理邮箱、新建邮件、移动或标记邮件。配置及反代发现路由见 [OAuth 接入说明](ONBOARDING.md#单用户-oauth)。各助手仍需实际验证兼容性。
 
 | MCP 工具                                             | 用途                     | 令牌       |
 | ---------------------------------------------------- | ------------------------ | ---------- |
 | `list_accounts` / `search` / `get_message`           | 账户、检索、纯文本详情   | 只读或可写 |
+| `prepare_reply` / `get_reply_status` | 准备回复并返回人工确认页、查询结果 | OAuth `mail:reply` |
 | `get_attachment`                                     | 按索引获取附件 base64    | 只读或可写 |
 | `set_flags` / `move`                                 | 已读、星标、移动         | 可写       |
 | `prepare_send` / `send_prepared` / `get_send_status` | 准备发送、执行、查询结果 | 可写       |
