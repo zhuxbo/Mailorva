@@ -1,4 +1,4 @@
-use ai_email_server::{api, config::Config, mail::LiveMailTransport, Service};
+use ai_email_server::{api, config::Config, mail::*, Service};
 use axum::{
     body::Body,
     http::{HeaderMap, Request, StatusCode},
@@ -47,10 +47,118 @@ async fn oauth_registered_client_metadata_cannot_be_tampered() {
     assert!(!h.contains_key("location"));
 }
 
+use ai_email_server::model::now;
+use async_trait::async_trait;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+#[derive(Default)]
+struct Fake {
+    fail: AtomicU32,
+    validity: AtomicU32,
+    sends: AtomicUsize,
+    outgoing: std::sync::Mutex<Vec<(String, OutgoingMail)>>,
+    moves: AtomicUsize,
+    attachments: AtomicUsize,
+    invalidations: AtomicUsize,
+}
+#[async_trait]
+impl MailTransport for Fake {
+    async fn invalidate_account(&self, _: &str) {
+        self.invalidations.fetch_add(1, Ordering::SeqCst);
+    }
+    async fn snapshot(&self, _: &MailAccount, _: &str, _: i64) -> Result<MailboxState, MailError> {
+        if self.fail.load(Ordering::SeqCst) == u32::MAX {
+            std::future::pending::<()>().await;
+        }
+        Ok(MailboxState {
+            uid_validity: self.validity.load(Ordering::SeqCst) + 1,
+            uid_next: 4,
+            uids: vec![1, 2, 3],
+        })
+    }
+    async fn fetch(
+        &self,
+        _: &MailAccount,
+        _: &str,
+        _: u32,
+        uid: u32,
+    ) -> Result<MailMessage, MailError> {
+        if self.fail.load(Ordering::SeqCst) == uid {
+            Err(MailError::Unavailable("SECRET upstream failure".into()))
+        } else {
+            Ok(mail(uid, "正文证书 100%_到期", now()))
+        }
+    }
+    async fn set_flags(
+        &self,
+        _: &MailAccount,
+        _: &str,
+        _: u32,
+        _: u32,
+        _: Option<bool>,
+        _: Option<bool>,
+    ) -> Result<(), MailError> {
+        Ok(())
+    }
+    async fn move_message(
+        &self,
+        _: &MailAccount,
+        _: &str,
+        _: u32,
+        _: u32,
+        _: &str,
+    ) -> Result<(), MailError> {
+        self.moves.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    async fn attachment(
+        &self,
+        _: &MailAccount,
+        _: &str,
+        _: u32,
+        _: u32,
+        _: usize,
+    ) -> Result<AttachmentData, MailError> {
+        self.attachments.fetch_add(1, Ordering::SeqCst);
+        Err(MailError::NotFound)
+    }
+    async fn send(
+        &self,
+        account: &MailAccount,
+        mail: &OutgoingMail,
+    ) -> Result<SendResult, MailError> {
+        self.outgoing
+            .lock()
+            .unwrap()
+            .push((account.id.clone(), mail.clone()));
+        self.sends.fetch_add(1, Ordering::SeqCst);
+        Ok(SendResult {
+            response: "ok".into(),
+        })
+    }
+}
+fn mail(uid: u32, body: &str, date: i64) -> MailMessage {
+    MailMessage {
+        uid,
+        received_at: date,
+        subject: "证书通知".into(),
+        from_address: "vendor@example.com".into(),
+        to_addresses: vec!["me@example.com".into()],
+        cc_addresses: vec!["copy@example.com".into()],
+        reply_to_addresses: vec![],
+        delivery_addresses: vec![],
+        body_text: body.into(),
+        message_id: Some(format!("<{uid}@example.com>")),
+        references: vec![],
+        flags: vec![],
+        attachments: vec![],
+    }
+}
+
 struct Fixture {
     _dir: tempfile::TempDir,
     service: Arc<Service>,
     app: Router,
+    fake: Arc<Fake>,
 }
 impl Fixture {
     async fn new() -> Self {
@@ -59,6 +167,7 @@ impl Fixture {
             ("read", "r".repeat(32)),
             ("write", "w".repeat(32)),
             ("approval", APPROVAL.into()),
+            ("password", "test-password".into()),
         ] {
             std::fs::write(dir.path().join(name), value).unwrap();
         }
@@ -66,18 +175,19 @@ impl Fixture {
             "database_path":dir.path().join("mail.db"),
             "read_token":{"file":dir.path().join("read")},
             "write_token":{"file":dir.path().join("write")},
+            "accounts":[{"id":"a","email":"me@example.com","display_name":"Test","imap_host":"imap.example.com","smtp_host":"smtp.example.com","password":{"file":dir.path().join("password")},"folders":["INBOX"],"aliases":["alias@example.com"]}],
             "oauth":{"resource":RESOURCE,"issuer":RESOURCE.trim_end_matches('/'),"approval_secret":{"file":dir.path().join("approval")},
                 "allowed_redirect_origins":["https://chatgpt.com"]}
         }))
         .unwrap();
-        let service = Service::new(config, Arc::new(LiveMailTransport::default()))
-            .await
-            .unwrap();
+        let fake = Arc::new(Fake::default());
+        let service = Service::new(config, fake.clone()).await.unwrap();
         let app = api::router(service.clone()).unwrap();
         Self {
             _dir: dir,
             service,
             app,
+            fake,
         }
     }
     async fn request(
@@ -119,6 +229,9 @@ impl Fixture {
             .into()
     }
     async fn authorize(&self, client: &str) -> (String, String) {
+        self.authorize_scope(client, "mail:read").await
+    }
+    async fn authorize_scope(&self, client: &str, scope: &str) -> (String, String) {
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(VERIFIER));
         let path = format!(
             "/oauth/authorize?{}",
@@ -126,7 +239,7 @@ impl Fixture {
                 ("client_id", client),
                 ("redirect_uri", REDIRECT),
                 ("response_type", "code"),
-                ("scope", "mail:read"),
+                ("scope", scope),
                 ("resource", RESOURCE),
                 ("code_challenge_method", "S256"),
                 ("code_challenge", &challenge),
@@ -163,7 +276,10 @@ impl Fixture {
         (id, cookie)
     }
     async fn code(&self, client: &str) -> String {
-        let (id, cookie) = self.authorize(client).await;
+        self.code_scope(client, "mail:read").await
+    }
+    async fn code_scope(&self, client: &str, scope: &str) -> String {
+        let (id, cookie) = self.authorize_scope(client, scope).await;
         let (s, h, b) = self
             .request(
                 "POST",
@@ -480,7 +596,7 @@ async fn oauth_metadata_and_challenge_do_not_require_mail_credentials() {
         let (s, _, b) = f.request("GET", path, &[], String::new()).await;
         assert_eq!(s, StatusCode::OK, "{b}");
         let v: Value = serde_json::from_str(&b).unwrap();
-        assert_eq!(v["scopes_supported"], json!(["mail:read"]));
+        assert_eq!(v["scopes_supported"], json!(["mail:read", "mail:reply"]));
     }
 }
 
@@ -786,4 +902,337 @@ async fn oauth_code_is_single_use_and_expired_access_is_rejected() {
         )
         .await;
     assert_eq!(s, StatusCode::OK, "{b}");
+}
+
+#[tokio::test]
+async fn oauth_reply_scope_is_explicit_and_refresh_cannot_escalate() {
+    let f = Fixture::new().await;
+    let client = f.register().await;
+    let code = f.code_scope(&client, "mail:read mail:reply").await;
+    let reply = f.token(&client, &code).await;
+    assert_eq!(reply["scope"], "mail:read mail:reply");
+    let code = f.code(&client).await;
+    let read = f.token(&client, &code).await;
+    for (token, requested, expected) in [
+        (&read, Some("mail:read mail:reply"), None),
+        (&reply, None, Some("mail:read mail:reply")),
+    ] {
+        let mut fields = vec![
+            ("grant_type", "refresh_token"),
+            ("client_id", client.as_str()),
+            ("refresh_token", token["refresh_token"].as_str().unwrap()),
+            ("resource", RESOURCE),
+        ];
+        if let Some(scope) = requested {
+            fields.push(("scope", scope));
+        }
+        let (status, _, body) = f
+            .request(
+                "POST",
+                "/oauth/token",
+                &[("content-type", "application/x-www-form-urlencoded")],
+                form(&fields),
+            )
+            .await;
+        let body: Value = serde_json::from_str(&body).unwrap();
+        if let Some(scope) = expected {
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["scope"], scope);
+        } else {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert_eq!(body["error"], "invalid_scope");
+        }
+    }
+}
+
+impl Fixture {
+    async fn reply_token(&self) -> Value {
+        let client = self.register().await;
+        let code = self.code_scope(&client, "mail:read mail:reply").await;
+        self.token(&client, &code).await
+    }
+    async fn prepare_reply(&self, access: &str, operation: &str) -> Value {
+        self.service
+            .db
+            .put("a", "me@example.com", "INBOX", 1, mail(1, "原邮件", now()))
+            .await
+            .unwrap();
+        let (_, result) = self.mcp(access,"tools/call",json!({"name":"prepare_reply","arguments":{
+            "id":"a:494e424f58:1:1","operation_id":operation,"body_text":"回复 <script>alert(1)</script>","from_address":"alias@example.com"
+        }})).await;
+        assert_ne!(result["result"]["isError"], true, "{result}");
+        serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+    }
+    async fn confirmation(&self, path: &str) -> (String, String, String) {
+        let (status, headers, body) = self.request("GET", path, &[], String::new()).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let cookie = headers["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let nonce = body
+            .split("name=\"request_id\" value=\"")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .to_owned();
+        (nonce, cookie, body)
+    }
+}
+#[tokio::test]
+async fn oauth_reply_requires_human_confirmation_and_sends_once() {
+    let f = Fixture::new().await;
+    let token = f.reply_token().await;
+    let access = token["access_token"].as_str().unwrap();
+    let (_, tools) = f.mcp(access, "tools/list", json!({})).await;
+    let tools = tools["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 6);
+    assert!(!tools.iter().any(|t| t["name"] == "send_prepared"));
+    let preview = f.prepare_reply(access, "reply-1").await;
+    assert_eq!(preview["to"], json!(["vendor@example.com"]));
+    assert_eq!(preview["from_address"], "alias@example.com");
+    assert_eq!(f.fake.sends.load(Ordering::SeqCst), 0);
+    let url = preview["confirmation_url"].as_str().unwrap();
+    let path = url.strip_prefix(RESOURCE.trim_end_matches('/')).unwrap();
+    let (nonce, cookie, body) = f.confirmation(path).await;
+    assert!(body.contains("&lt;script&gt;"));
+    assert!(!body.contains("<script>"));
+    assert!(body.contains("alias@example.com") && body.contains("vendor@example.com"));
+    let headers = [
+        ("origin", "https://mail.example.com"),
+        ("cookie", cookie.as_str()),
+        ("content-type", "application/x-www-form-urlencoded"),
+    ];
+    let form_body = form(&[
+        ("request_id", &nonce),
+        ("approval_secret", APPROVAL),
+        ("decision", "send"),
+    ]);
+    let (s, _, body) = f.request("POST", path, &headers, form_body.clone()).await;
+    assert_eq!(s, StatusCode::OK, "{body}");
+    assert!(body.contains("回复已发送"));
+    assert_eq!(f.fake.sends.load(Ordering::SeqCst), 1);
+    let (s, _, _) = f.request("POST", path, &headers, form_body).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(f.fake.sends.load(Ordering::SeqCst), 1);
+    let outgoing = f.fake.outgoing.lock().unwrap();
+    assert_eq!(
+        outgoing[0].1.in_reply_to.as_deref(),
+        Some("<1@example.com>")
+    );
+    assert_eq!(outgoing[0].1.from_address, "alias@example.com");
+}
+#[tokio::test]
+async fn oauth_reply_rejects_bypass_cross_grant_and_revoked_confirmation() {
+    let f = Fixture::new().await;
+    let token = f.reply_token().await;
+    let access = token["access_token"].as_str().unwrap();
+    let preview = f.prepare_reply(access, "reply-1").await;
+    let path = preview["confirmation_url"]
+        .as_str()
+        .unwrap()
+        .strip_prefix(RESOURCE.trim_end_matches('/'))
+        .unwrap();
+    for (origin, secret, cookie_valid) in [
+        ("https://evil.example", APPROVAL, true),
+        ("https://mail.example.com", "wrong", true),
+        ("https://mail.example.com", APPROVAL, false),
+    ] {
+        let (nonce, cookie, _) = f.confirmation(path).await;
+        let (status, _, _) = f
+            .request(
+                "POST",
+                path,
+                &[
+                    ("origin", origin),
+                    ("cookie", if cookie_valid { &cookie } else { "" }),
+                    ("content-type", "application/x-www-form-urlencoded"),
+                ],
+                form(&[
+                    ("request_id", &nonce),
+                    ("approval_secret", secret),
+                    ("decision", "send"),
+                ]),
+            )
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+    for name in [
+        "send_prepared",
+        "prepare_send",
+        "move",
+        "set_flags",
+        "get_send_status",
+    ] {
+        let (_, v) = f
+            .mcp(
+                access,
+                "tools/call",
+                json!({"name":name,"arguments":{"operation_id":"reply-1"}}),
+            )
+            .await;
+        assert_eq!(v["result"]["isError"], true, "{v}");
+    }
+    let other = f.reply_token().await;
+    let (_, v) = f
+        .mcp(
+            other["access_token"].as_str().unwrap(),
+            "tools/call",
+            json!({"name":"get_reply_status","arguments":{"operation_id":"reply-1"}}),
+        )
+        .await;
+    assert_eq!(v["result"]["isError"], true);
+    let (nonce, cookie, _) = f.confirmation(path).await;
+    sqlx::query("DELETE FROM oauth_tokens WHERE access_hash=?")
+        .bind(hex::encode(Sha256::digest(access)))
+        .execute(&f.service.db.pool)
+        .await
+        .unwrap();
+    let (status, _, _) = f
+        .request(
+            "POST",
+            path,
+            &[
+                ("origin", "https://mail.example.com"),
+                ("cookie", &cookie),
+                ("content-type", "application/x-www-form-urlencoded"),
+            ],
+            form(&[
+                ("request_id", &nonce),
+                ("approval_secret", APPROVAL),
+                ("decision", "send"),
+            ]),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(f.fake.sends.load(Ordering::SeqCst), 0);
+}
+#[tokio::test]
+async fn oauth_reply_expiry_and_changed_payload_block_send() {
+    let f = Fixture::new().await;
+    let token = f.reply_token().await;
+    let access = token["access_token"].as_str().unwrap();
+    for (op, mutation, expected) in [
+        (
+            "expired",
+            "UPDATE oauth_replies SET expires_at=0",
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "modified",
+            "UPDATE send_operations SET payload_hash='changed'",
+            StatusCode::CONFLICT,
+        ),
+    ] {
+        let preview = f.prepare_reply(access, op).await;
+        let path = preview["confirmation_url"]
+            .as_str()
+            .unwrap()
+            .strip_prefix(RESOURCE.trim_end_matches('/'))
+            .unwrap();
+        let (nonce, cookie, _) = f.confirmation(path).await;
+        sqlx::query(mutation)
+            .execute(&f.service.db.pool)
+            .await
+            .unwrap();
+        let (status, _, _) = f
+            .request(
+                "POST",
+                path,
+                &[
+                    ("origin", "https://mail.example.com"),
+                    ("cookie", &cookie),
+                    ("content-type", "application/x-www-form-urlencoded"),
+                ],
+                form(&[
+                    ("request_id", &nonce),
+                    ("approval_secret", APPROVAL),
+                    ("decision", "send"),
+                ]),
+            )
+            .await;
+        assert_eq!(status, expected);
+    }
+    assert_eq!(f.fake.sends.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn oauth_reply_revoked_while_waiting_for_account_lock_cannot_send() {
+    let f = Fixture::new().await;
+    let token = f.reply_token().await;
+    let access = token["access_token"].as_str().unwrap();
+    let preview = f.prepare_reply(access, "blocked-reply").await;
+    let path = preview["confirmation_url"]
+        .as_str()
+        .unwrap()
+        .strip_prefix(RESOURCE.trim_end_matches('/'))
+        .unwrap();
+    let (nonce, cookie, _) = f.confirmation(path).await;
+    let lock = f.service.account_lock("a").await;
+    let request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("host", "localhost")
+        .header("origin", "https://mail.example.com")
+        .header("cookie", cookie)
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(Body::from(form(&[
+            ("request_id", &nonce),
+            ("approval_secret", APPROVAL),
+            ("decision", "send"),
+        ])))
+        .unwrap();
+    let app = f.app.clone();
+    let pending = tokio::spawn(async move { app.oneshot(request).await.unwrap() });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let (count,): (i64,) =
+                sqlx::query_as("SELECT COUNT(*) FROM oauth_requests WHERE hash=?")
+                    .bind(hex::encode(Sha256::digest(&nonce)))
+                    .fetch_one(&f.service.db.pool)
+                    .await
+                    .unwrap();
+            if count == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    sqlx::query("DELETE FROM oauth_tokens")
+        .execute(&f.service.db.pool)
+        .await
+        .unwrap();
+    drop(lock);
+    assert_eq!(pending.await.unwrap().status(), StatusCode::FORBIDDEN);
+    assert_eq!(f.fake.sends.load(Ordering::SeqCst), 0);
+}
+#[tokio::test]
+async fn oauth_existing_token_schema_migrates_to_readonly() {
+    let f = Fixture::new().await;
+    let client = f.register().await;
+    let code = f.code(&client).await;
+    let token = f.token(&client, &code).await;
+    sqlx::query("ALTER TABLE oauth_tokens DROP COLUMN scope")
+        .execute(&f.service.db.pool)
+        .await
+        .unwrap();
+    let oauth = ai_email_server::oauth::OAuth::new(
+        f.service.config.oauth.clone().unwrap(),
+        f.service.db.pool.clone(),
+    )
+    .await
+    .unwrap();
+    let grant = oauth
+        .access(token["access_token"].as_str().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!grant.reply);
 }

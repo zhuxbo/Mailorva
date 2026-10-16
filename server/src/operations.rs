@@ -248,6 +248,12 @@ impl Service {
         })
     }
     pub async fn send_prepared(&self, id: &str) -> Result<SendStatus> {
+        self.send_prepared_inner(id, false).await
+    }
+    pub(crate) async fn send_confirmed_reply(&self, id: &str) -> Result<SendStatus> {
+        self.send_prepared_inner(id, true).await
+    }
+    async fn send_prepared_inner(&self, id: &str, oauth_reply: bool) -> Result<SendStatus> {
         let row = sqlx::query("SELECT payload,status,message_id FROM send_operations WHERE id=?")
             .bind(id)
             .fetch_optional(&self.db.pool)
@@ -301,13 +307,21 @@ impl Service {
             references,
             message_id: row.get("message_id"),
         };
-        let changed = sqlx::query(
-            "UPDATE send_operations SET status='sending' WHERE id=? AND status='prepared'",
-        )
-        .bind(id)
-        .execute(&self.db.pool)
-        .await?
-        .rows_affected();
+        let changed = if oauth_reply {
+            self.oauth
+                .as_ref()
+                .ok_or(AppError::Forbidden)?
+                .claim_reply_send(id)
+                .await?
+        } else {
+            sqlx::query(
+                "UPDATE send_operations SET status='sending' WHERE id=? AND status='prepared'",
+            )
+            .bind(id)
+            .execute(&self.db.pool)
+            .await?
+            .rows_affected()
+        };
         if changed == 0 {
             return self.send_status(id).await;
         }

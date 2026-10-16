@@ -15,10 +15,11 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Access {
     pub write: bool,
     pub oauth: bool,
+    pub grant: Option<crate::oauth::Grant>,
 }
 #[derive(Clone)]
 struct Auth {
@@ -57,9 +58,11 @@ async fn authenticate(
     );
     let read = bool::from(token.as_bytes().ct_eq(auth.read.expose_secret().as_bytes()));
     let mut oauth_access = false;
+    let mut grant = None;
     if !write && !read {
         if let Some(oauth) = auth.oauth.as_ref().filter(|_| is_mcp) {
-            if !oauth.valid_access(token).await? {
+            grant = oauth.access(token).await?;
+            if grant.is_none() {
                 return Ok(oauth.challenge());
             }
             oauth_access = true;
@@ -70,6 +73,7 @@ async fn authenticate(
     request.extensions_mut().insert(Access {
         write,
         oauth: oauth_access,
+        grant,
     });
     Ok(next.run(request).await)
 }
@@ -112,7 +116,9 @@ pub fn router(service: Arc<Service>) -> anyhow::Result<Router> {
         .layer(middleware::from_fn_with_state(auth, authenticate))
         .with_state(service.clone());
     Ok(match &service.oauth {
-        Some(oauth) => router.merge(crate::oauth::router(oauth.clone())),
+        Some(oauth) => router
+            .merge(crate::oauth::router(oauth.clone()))
+            .merge(crate::oauth::reply::router(service.clone())),
         None => router,
     })
 }

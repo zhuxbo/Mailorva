@@ -1,3 +1,4 @@
+pub(crate) mod reply;
 mod store;
 
 use crate::{config::SecretRef, error::AppError};
@@ -28,6 +29,22 @@ use subtle::ConstantTimeEq;
 use url::Url;
 
 const SCOPE: &str = "mail:read";
+const REPLY_SCOPE: &str = "mail:read mail:reply";
+fn read_scope() -> String {
+    SCOPE.into()
+}
+fn normalized_scope(scope: Option<&str>) -> Result<String, OAuthError> {
+    let values: Vec<_> = scope.unwrap_or(SCOPE).split_whitespace().collect();
+    if !values.contains(&SCOPE) || values.iter().any(|s| ![SCOPE, "mail:reply"].contains(s)) {
+        return Err(OAuthError::bad("invalid_scope"));
+    }
+    Ok(if values.contains(&"mail:reply") {
+        REPLY_SCOPE
+    } else {
+        SCOPE
+    }
+    .into())
+}
 const COOKIE: &str = "__Secure-ai_email_oauth";
 
 #[derive(Clone, Deserialize)]
@@ -80,6 +97,12 @@ impl OAuthConfig {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct Grant {
+    pub reply: bool,
+    family: String,
+}
+
 pub struct OAuth {
     config: OAuthConfig,
     issuer: String,
@@ -110,11 +133,14 @@ impl OAuth {
         }))
     }
     pub async fn valid_access(&self, token: &str) -> Result<bool, AppError> {
+        Ok(self.access(token).await?.is_some())
+    }
+    pub async fn access(&self, token: &str) -> Result<Option<Grant>, AppError> {
         if token.len() > 256 {
-            return Ok(false);
+            return Ok(None);
         }
         self.store
-            .valid_access(token, &self.binding)
+            .access(token, &self.binding)
             .await
             .map_err(|_| AppError::Internal)
     }
@@ -150,10 +176,7 @@ impl OAuth {
         Ok(())
     }
     fn scope(&self, scope: Option<&str>) -> Result<(), OAuthError> {
-        if scope.is_some_and(|s| s != SCOPE) {
-            return Err(OAuthError::bad("invalid_scope"));
-        }
-        Ok(())
+        normalized_scope(scope).map(|_| ())
     }
     async fn authenticate_client(
         &self,
@@ -306,7 +329,7 @@ async fn security_headers(
 }
 async fn resource_metadata(State(o): State<Arc<OAuth>>) -> Json<Value> {
     Json(
-        json!({"resource":o.config.resource,"authorization_servers":[o.issuer],"scopes_supported":[SCOPE],"bearer_methods_supported":["header"],"resource_name":"AI Email 只读邮件"}),
+        json!({"resource":o.config.resource,"authorization_servers":[o.issuer],"scopes_supported":[SCOPE,"mail:reply"],"bearer_methods_supported":["header"],"resource_name":"AI Email 邮件"}),
     )
 }
 async fn server_metadata(State(o): State<Arc<OAuth>>) -> Json<Value> {
@@ -316,7 +339,7 @@ async fn server_metadata(State(o): State<Arc<OAuth>>) -> Json<Value> {
         "registration_endpoint":format!("{}/oauth/register",o.issuer),
         "revocation_endpoint":format!("{}/oauth/revoke",o.issuer),
         "response_types_supported":["code"],"grant_types_supported":["authorization_code","refresh_token"],
-        "code_challenge_methods_supported":["S256"],"scopes_supported":[SCOPE],
+        "code_challenge_methods_supported":["S256"],"scopes_supported":[SCOPE,"mail:reply"],
         "token_endpoint_auth_methods_supported":["none","client_secret_basic","client_secret_post"],
         "revocation_endpoint_auth_methods_supported":["none","client_secret_basic","client_secret_post"],
         "authorization_response_iss_parameter_supported":true}))
@@ -395,7 +418,7 @@ async fn register(
     // Registration is stateless: unauthenticated requests cannot fill a client table.
     let client_id = o.client_id(&client)?;
     let mut response = json!({"client_id":client_id,"client_id_issued_at":crate::model::now(),"redirect_uris":client.redirects,
-        "client_name":client.name,"token_endpoint_auth_method":client.method,"grant_types":grants,"response_types":["code"],"scope":SCOPE});
+        "client_name":client.name,"token_endpoint_auth_method":client.method,"grant_types":grants,"response_types":["code"],"scope":normalized_scope(r.scope.as_deref())?});
     if let Some(secret) = secret {
         response["client_secret"] = json!(secret);
         response["client_secret_expires_at"] = json!(0);
@@ -422,6 +445,8 @@ struct Pending {
 }
 #[derive(Serialize, Deserialize)]
 struct Code {
+    #[serde(default = "read_scope")]
+    scope: String,
     client_id: String,
     redirect_uri: String,
     challenge: String,
@@ -453,6 +478,22 @@ async fn authorize(
     let id = random();
     let cookie = random();
     let redirect = html(&a.redirect_uri);
+    let reply = normalized_scope(a.scope.as_deref())? == REPLY_SCOPE;
+    let title = if reply {
+        "允许读取和回复邮件？"
+    } else {
+        "允许读取邮件？"
+    };
+    let detail = if reply {
+        "允许列出邮箱、搜索和读取邮件及附件，以及回复已有邮件。每封回复必须在独立确认页核对完整内容并用授权口令确认后才能发送。不能新建邮件、移动、标记邮件或管理邮箱。"
+    } else {
+        "允许列出邮箱、搜索和读取邮件及附件。不能发送、移动、标记邮件或管理邮箱。"
+    };
+    let button = if reply {
+        "允许读取及确认后回复"
+    } else {
+        "允许只读访问"
+    };
     o.store
         .save(
             &id,
@@ -467,7 +508,7 @@ async fn authorize(
         .await?;
     let action = html(&format!("{}/oauth/authorize", o.issuer));
     let page = format!(
-        r#"<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Email · 只读授权</title><style>body{{font:16px/1.7 system-ui,sans-serif;background:#f5f6f8;color:#20242a;margin:0;padding:32px 20px}}main{{max-width:480px;margin:5vh auto;padding:32px;background:white;border:1px solid #dde1e6;border-radius:16px}}h1{{font-size:24px}}p{{overflow-wrap:anywhere}}label{{display:block;font-weight:600}}input[type=password]{{box-sizing:border-box;width:100%;padding:12px;margin:8px 0 20px;border:1px solid #929aa5;border-radius:8px;font:inherit}}button{{font:inherit;padding:10px 18px;border:1px solid #ccd1d8;border-radius:8px;cursor:pointer}}button[value=approve]{{background:#2053c9;color:white;border-color:#2053c9}}small{{color:#586473}}</style><main><h1>允许读取邮件？</h1><p><strong>{}</strong> 请求连接你的 AI Email。</p><p>允许列出邮箱、搜索和读取邮件及附件。不能发送、移动、标记邮件或管理邮箱。授权最长保留 30 天。</p><p><small>授权后返回：{redirect}</small></p><form method="post" action="{action}"><input type="hidden" name="request_id" value="{id}"><label for="secret">授权口令</label><input id="secret" type="password" name="approval_secret" autocomplete="off" required maxlength="256"><p><small>使用部署时生成的 AI Email 专用授权口令，不是邮箱密码。口令只提交给此服务。</small></p><button name="decision" value="approve">允许只读访问</button> <button name="decision" value="deny" formnovalidate>取消</button></form></main></html>"#,
+        r#"<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Email · 授权</title><style>body{{font:16px/1.7 system-ui,sans-serif;background:#f5f6f8;color:#20242a;margin:0;padding:32px 20px}}main{{max-width:480px;margin:5vh auto;padding:32px;background:white;border:1px solid #dde1e6;border-radius:16px}}h1{{font-size:24px}}p{{overflow-wrap:anywhere}}label{{display:block;font-weight:600}}input[type=password]{{box-sizing:border-box;width:100%;padding:12px;margin:8px 0 20px;border:1px solid #929aa5;border-radius:8px;font:inherit}}button{{font:inherit;padding:10px 18px;border:1px solid #ccd1d8;border-radius:8px;cursor:pointer}}button[value=approve]{{background:#2053c9;color:white;border-color:#2053c9}}small{{color:#586473}}</style><main><h1>{title}</h1><p><strong>{}</strong> 请求连接你的 AI Email。</p><p>{detail}授权最长保留 30 天。</p><p><small>授权后返回：{redirect}</small></p><form method="post" action="{action}"><input type="hidden" name="request_id" value="{id}"><label for="secret">授权口令</label><input id="secret" type="password" name="approval_secret" autocomplete="off" required maxlength="256"><p><small>使用部署时生成的 AI Email 专用授权口令，不是邮箱密码。口令只提交给此服务。</small></p><button name="decision" value="approve">{button}</button> <button name="decision" value="deny" formnovalidate>取消</button></form></main></html>"#,
         html(&client.name)
     );
     let mut response = Html(page).into_response();
@@ -538,6 +579,7 @@ async fn consent(
                 &code,
                 "code",
                 &Code {
+                    scope: normalized_scope(p.request.scope.as_deref())?,
                     client_id: p.request.client_id,
                     redirect_uri: p.request.redirect_uri.clone(),
                     challenge: p.request.code_challenge,
@@ -574,7 +616,7 @@ struct TokenPair {
     refresh_token: String,
     token_type: &'static str,
     expires_in: i64,
-    scope: &'static str,
+    scope: String,
 }
 impl TokenPair {
     fn new() -> Self {
@@ -583,7 +625,7 @@ impl TokenPair {
             refresh_token: random(),
             token_type: "Bearer",
             expires_in: 3600,
-            scope: SCOPE,
+            scope: SCOPE.into(),
         }
     }
 }
@@ -623,7 +665,12 @@ async fn token(
             {
                 return Err(OAuthError::invalid_grant());
             }
-            o.store.issue(&client_id, &o.binding).await?
+            if f.scope.as_deref().is_some_and(|scope| {
+                normalized_scope(Some(scope)).ok().as_ref() != Some(&code.scope)
+            }) {
+                return Err(OAuthError::bad("invalid_scope"));
+            }
+            o.store.issue(&client_id, &o.binding, &code.scope).await?
         }
         Some("refresh_token") => {
             o.store
@@ -633,6 +680,7 @@ async fn token(
                         .ok_or_else(OAuthError::invalid_grant)?,
                     &client_id,
                     &o.binding,
+                    f.scope.as_deref(),
                 )
                 .await?
         }
