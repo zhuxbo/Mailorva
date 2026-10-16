@@ -5,6 +5,7 @@ import Combine
     @Published public private(set) var accounts: [Account] = []
     @Published public private(set) var sync: [SyncStatus] = []
     @Published public private(set) var canWrite = false
+    @Published public private(set) var accountsLoaded = false
     @Published public private(set) var items: [MailMessage] = []
     @Published public private(set) var total = 0
     @Published public private(set) var nextOffset = 0
@@ -15,6 +16,8 @@ import Combine
     @Published public private(set) var detail: MailMessage?
     @Published public private(set) var detailLoading = false
     @Published public private(set) var detailError: String?
+    @Published public private(set) var readError: String?
+    private var readTasks: [String: Task<Void, Never>] = [:]
     private let api: any MailAPI
     private var query = ""
     private var accountId: String?
@@ -24,7 +27,7 @@ import Combine
     private var detailTask: Task<Void, Never>?
     private var accountTask: Task<Void, Never>?
     public init(api: any MailAPI) { self.api = api }
-    deinit { queryTask?.cancel(); detailTask?.cancel(); accountTask?.cancel() }
+    deinit { queryTask?.cancel(); detailTask?.cancel(); accountTask?.cancel(); readTasks.values.forEach { $0.cancel() } }
     public func refreshAccounts() {
         accountTask?.cancel()
         accountTask = Task {
@@ -32,7 +35,8 @@ import Combine
                 let response = try await api.accounts()
                 guard !Task.isCancelled else { return }
                 accounts = response.accounts; sync = response.sync
-                canWrite = response.canWrite == true; accountsError = nil
+                canWrite = response.canWrite == true; accountsError = nil; accountsLoaded = true
+                markCurrentMessageRead()
             } catch { if !Task.isCancelled { accountsError = error.localizedDescription; canWrite = false } }
         }
     }
@@ -67,7 +71,7 @@ import Combine
     }
     public func openMessage(id: String?) {
         detailGeneration += 1; detailTask?.cancel()
-        selectedId = id; detail = nil; detailError = nil; detailLoading = id != nil
+        selectedId = id; detail = nil; detailError = nil; readError = nil; detailLoading = id != nil
         guard let id else { return }
         let current = detailGeneration
         detailTask = Task {
@@ -75,10 +79,30 @@ import Combine
                 let value = try await api.message(id: id)
                 guard current == detailGeneration, !Task.isCancelled else { return }
                 detail = value; detailLoading = false
+                markCurrentMessageRead()
             } catch {
                 guard current == detailGeneration, !Task.isCancelled else { return }
                 detailError = error.localizedDescription; detailLoading = false
             }
         }
     }
+    public func markCurrentMessageRead() {
+        guard canWrite, let message = detail, !message.isRead, readTasks[message.id] == nil else { return }
+        let id = message.id
+        readError = nil
+        readTasks[id] = Task {
+            defer { readTasks[id] = nil }
+            do {
+                let flags = try await api.markRead(id: id)
+                guard !Task.isCancelled else { return }
+                if detail?.id == id { detail?.flags = flags; readError = nil }
+                if let index = items.firstIndex(where: { $0.id == id }) { items[index].flags = flags }
+            } catch {
+                if !Task.isCancelled, detail?.id == id {
+                    readError = "标记已读失败，请重试。" + error.localizedDescription
+                }
+            }
+        }
+    }
+
 }

@@ -19,10 +19,18 @@ func page(_ ids: [String], total: Int) throws -> MessagePage {
     var requests: [(String, Int)] = []
     var continuations: [String: CheckedContinuation<MessagePage, Error>] = [:]
     var details: [String: CheckedContinuation<MailMessage, Error>] = [:]
+    var readRequests: [String] = []
+    var failRead = false
+    var allowWrite = true
+    func markRead(id: String) async throws -> [String] {
+        readRequests.append(id)
+        if failRead { throw ClientError.unavailable }
+        return ["\\Seen"]
+    }
     var sent = 0
     var checked = 0
     var failSend = false
-    func accounts() async throws -> AccountResponse { try decode(#"{"accounts":[],"can_write":true,"sync":[]}"#) }
+    func accounts() async throws -> AccountResponse { try decode("{\"accounts\":[],\"can_write\":\(allowWrite),\"sync\":[]}") }
     func messages(query: String, accountId: String?, offset: Int) async throws -> MessagePage {
         requests.append((query, offset))
         if query == "pages" { return pages.removeFirst() }
@@ -31,7 +39,7 @@ func page(_ ids: [String], total: Int) throws -> MessagePage {
     func message(id: String) async throws -> MailMessage {
         try await withCheckedThrowingContinuation { details[id] = $0 }
     }
-    func prepareReply(id: String, operationId: String, body: String) async throws -> ReplyPreview {
+    func prepareReply(id: String, operationId: String, body: String, fromAddress: String?) async throws -> ReplyPreview {
         let data = try JSONSerialization.data(withJSONObject: ["operation_id":operationId,"status":"prepared","message_id":"<sent@example.com>","account_id":"a","account_email":"a@example.com","to":["reply@example.com"],"subject":"Re: 证书","body_text":body])
         return try decode(String(decoding: data, as: UTF8.self))
     }

@@ -19,7 +19,11 @@ func decode<T: Decodable>(_ json: String) throws -> T {
             try checkConnection()
             try await checkAPI()
             try await checkControllers()
-            print("PASS: connection, API, search races, pagination and reply recovery checks")
+            try await checkAccountAPI()
+            try await checkAccountStore()
+            try await checkAliasIdentity()
+            try await checkReadAndQuote()
+            print("PASS: connection, API, search races, pagination, reply recovery and multi-account management, alias identity, read flags and quoted reply checks")
         } catch {
             fputs("FAIL: \(error)\n", stderr)
             exit(1)

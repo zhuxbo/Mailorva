@@ -24,6 +24,10 @@ cat > "$app_dir/Contents/Info.plist" <<PLIST
 <key>CFBundleIconFile</key><string>$icon_name</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
+<key>NSAppTransportSecurity</key><dict>
+<key>NSAllowsLocalNetworking</key><true/>
+</dict>
+<key>NSLocalNetworkUsageDescription</key><string>连接你配置的内网邮件服务器，管理邮箱、搜索和回复邮件。</string>
 <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>
 PLIST

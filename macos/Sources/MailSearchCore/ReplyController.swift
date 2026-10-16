@@ -21,13 +21,13 @@ import Combine
         guard pending == nil, !busy else { return }
         preview = nil; status = nil; error = nil
     }
-    public func prepare(id: String, body: String) async {
+    public func prepare(id: String, body: String, fromAddress: String? = nil) async {
         guard !busy, pending == nil else { error = ClientError.pendingReply.localizedDescription; return }
         guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { error = ClientError.invalidReply.localizedDescription; return }
         busy = true; error = nil
         defer { busy = false }
         do {
-            preview = try await api.prepareReply(id: id, operationId: UUID().uuidString, body: body)
+            preview = try await api.prepareReply(id: id, operationId: UUID().uuidString, body: body, fromAddress: fromAddress)
             status = preview?.status
         } catch { self.error = error.localizedDescription }
     }

@@ -6,6 +6,7 @@ import MailSearchCore
     @Published private(set) var connection: Connection?
     @Published private(set) var search: SearchStore?
     @Published private(set) var reply: ReplyController?
+    @Published private(set) var accountSettings: AccountSettingsStore?
     @Published var error: String?
     private let vault = KeychainVault()
     init() {
@@ -27,6 +28,7 @@ import MailSearchCore
     }
     private func install(_ connection: Connection, api: HTTPMailAPI, reply: ReplyController) {
         self.connection = connection; self.reply = reply
+        accountSettings = AccountSettingsStore(api: api)
         let search = SearchStore(api: api)
         self.search = search; error = nil
         search.refreshAccounts(); search.search(query: "", accountId: nil)
@@ -34,6 +36,6 @@ import MailSearchCore
     func disconnect() throws {
         guard reply?.pending == nil, reply?.busy != true else { throw ClientError.pendingReply }
         try vault.saveConnection(nil)
-        connection = nil; search = nil; reply = nil; error = nil
+        connection = nil; search = nil; reply = nil; accountSettings = nil; error = nil
     }
 }
