@@ -65,6 +65,8 @@ pub struct Config {
     pub read_token: SecretRef,
     pub write_token: SecretRef,
     #[serde(default)]
+    pub oauth: Option<crate::oauth::OAuthConfig>,
+    #[serde(default)]
     pub allowed_origins: Vec<String>,
     #[serde(default = "default_hosts")]
     pub allowed_hosts: Vec<String>,
@@ -122,6 +124,15 @@ impl Config {
             read.expose_secret() != write.expose_secret(),
             "只读和可写令牌必须不同"
         );
+        if let Some(oauth) = &self.oauth {
+            oauth.validate()?;
+            let secret = oauth.approval_secret.resolve()?;
+            anyhow::ensure!(
+                secret.expose_secret() != read.expose_secret()
+                    && secret.expose_secret() != write.expose_secret(),
+                "OAuth 授权口令必须独立于访问令牌"
+            );
+        }
         Ok(())
     }
     pub fn mail_account(&self, id: &str) -> anyhow::Result<crate::mail::MailAccount> {

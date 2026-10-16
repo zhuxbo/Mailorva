@@ -6,6 +6,7 @@ pub mod error;
 pub mod mail;
 pub mod mcp;
 pub mod model;
+pub mod oauth;
 pub mod operations;
 pub mod sync;
 use std::{collections::HashMap, sync::Arc};
@@ -14,6 +15,7 @@ pub struct Service {
     pub config: config::Config,
     pub db: db::Database,
     pub transport: Arc<dyn mail::MailTransport>,
+    pub oauth: Option<Arc<oauth::OAuth>>,
     account_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     account_changes: Mutex<()>,
 }
@@ -26,10 +28,15 @@ impl Service {
         let db = db::Database::open(&config.database_path).await?;
         account_settings::initialize(&db, &config.accounts).await?;
         db.cleanup(model::now()).await?;
+        let oauth = match &config.oauth {
+            Some(config) => Some(oauth::OAuth::new(config.clone(), db.pool.clone()).await?),
+            None => None,
+        };
         Ok(Arc::new(Self {
             config,
             db,
             transport,
+            oauth,
             account_locks: Mutex::new(HashMap::new()),
             account_changes: Mutex::new(()),
         }))

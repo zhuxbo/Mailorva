@@ -3,6 +3,7 @@
   "database_path": "/var/lib/ai-email/mail.db",
   "read_token": { "file": "/etc/ai-email/read-token" },
   "write_token": { "file": "/etc/ai-email/write-token" },
+  "oauth": null,
   "allowed_origins": [],
   "allowed_hosts": ["mail.example.com", "127.0.0.1", "localhost"],
   "sync_interval_seconds": 60,

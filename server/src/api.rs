@@ -18,12 +18,14 @@ use subtle::ConstantTimeEq;
 #[derive(Clone, Copy, Debug)]
 pub struct Access {
     pub write: bool,
+    pub oauth: bool,
 }
 #[derive(Clone)]
 struct Auth {
     read: Arc<SecretString>,
     write: Arc<SecretString>,
     origins: Vec<String>,
+    oauth: Option<Arc<crate::oauth::OAuth>>,
 }
 async fn authenticate(
     State(auth): State<Auth>,
@@ -36,22 +38,39 @@ async fn authenticate(
             return Err(AppError::Forbidden);
         }
     }
+    let is_mcp = request.uri().path() == "/mcp" || request.uri().path().starts_with("/mcp/");
     let token = request
         .headers()
         .get("authorization")
         .and_then(|h| h.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or(AppError::Unauthorized)?;
+        .and_then(|v| v.strip_prefix("Bearer "));
+    let Some(token) = token else {
+        return match auth.oauth.as_ref().filter(|_| is_mcp) {
+            Some(oauth) => Ok(oauth.challenge()),
+            None => Err(AppError::Unauthorized),
+        };
+    };
     let write = bool::from(
         token
             .as_bytes()
             .ct_eq(auth.write.expose_secret().as_bytes()),
     );
     let read = bool::from(token.as_bytes().ct_eq(auth.read.expose_secret().as_bytes()));
+    let mut oauth_access = false;
     if !write && !read {
-        return Err(AppError::Unauthorized);
+        if let Some(oauth) = auth.oauth.as_ref().filter(|_| is_mcp) {
+            if !oauth.valid_access(token).await? {
+                return Ok(oauth.challenge());
+            }
+            oauth_access = true;
+        } else {
+            return Err(AppError::Unauthorized);
+        }
     }
-    request.extensions_mut().insert(Access { write });
+    request.extensions_mut().insert(Access {
+        write,
+        oauth: oauth_access,
+    });
     Ok(next.run(request).await)
 }
 fn require_write(access: Access) -> Result<()> {
@@ -66,9 +85,10 @@ pub fn router(service: Arc<Service>) -> anyhow::Result<Router> {
         read: Arc::new(service.config.read_token.resolve()?),
         write: Arc::new(service.config.write_token.resolve()?),
         origins: service.config.allowed_origins.clone(),
+        oauth: service.oauth.clone(),
     };
     let mcp = crate::mcp::http_service(service.clone());
-    Ok(Router::new()
+    let router = Router::new()
         .route("/api/accounts", get(accounts))
         .route(
             "/api/account-settings",
@@ -90,7 +110,11 @@ pub fn router(service: Arc<Service>) -> anyhow::Result<Router> {
         .nest_service("/mcp", mcp)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(auth, authenticate))
-        .with_state(service))
+        .with_state(service.clone());
+    Ok(match &service.oauth {
+        Some(oauth) => router.merge(crate::oauth::router(oauth.clone())),
+        None => router,
+    })
 }
 async fn accounts(
     State(s): State<Arc<Service>>,

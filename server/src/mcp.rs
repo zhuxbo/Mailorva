@@ -48,7 +48,17 @@ fn tools() -> Vec<Tool> {
         ("prepare_send","准备发送操作；operation_id 必须唯一且同内容重放。准备后检查收件人与正文再调用 send_prepared",json!({"operation_id":text,"account_id":text,"to":array,"cc":array,"subject":text,"body_text":text,"reply_to_id":text,"from_address":text}),vec!["operation_id","account_id","to","subject","body_text"]),
         ("send_prepared","执行已准备发送；同一 operation_id 永不重复发送，unknown 请人工检查发件箱",json!({"operation_id":text}),vec!["operation_id"]),
         ("get_send_status","查询发送结果 prepared/sending/sent/failed/unknown/expired",json!({"operation_id":text}),vec!["operation_id"]),
-    ].into_iter().map(|(name,description,properties,required)| Tool::new(name,description,json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}).as_object().unwrap().clone())).collect()
+    ].into_iter().map(|(name,description,properties,required)| {
+        let mut tool = Tool::new(name,description,json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}).as_object().unwrap().clone());
+        tool.annotations = Some(ToolAnnotations::new().read_only(readonly_tool(name)));
+        tool
+    }).collect()
+}
+fn readonly_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "list_accounts" | "search" | "get_message" | "get_attachment"
+    )
 }
 fn string(args: &Value, name: &str) -> Result<String, AppError> {
     args.get(name)
@@ -128,10 +138,20 @@ impl ServerHandler for MailMcp {
     async fn list_tools(
         &self,
         _: Option<PaginatedRequestParams>,
-        _: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         Ok(ListToolsResult {
-            tools: tools(),
+            tools: {
+                let oauth = context
+                    .extensions
+                    .get::<axum::http::request::Parts>()
+                    .and_then(|p| p.extensions.get::<Access>())
+                    .is_some_and(|a| a.oauth);
+                tools()
+                    .into_iter()
+                    .filter(|t| !oauth || readonly_tool(&t.name))
+                    .collect()
+            },
             ..Default::default()
         })
     }
