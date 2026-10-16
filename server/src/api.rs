@@ -70,6 +70,14 @@ pub fn router(service: Arc<Service>) -> anyhow::Result<Router> {
     let mcp = crate::mcp::http_service(service.clone());
     Ok(Router::new()
         .route("/api/accounts", get(accounts))
+        .route(
+            "/api/account-settings",
+            get(account_settings).post(create_account),
+        )
+        .route(
+            "/api/account-settings/{id}",
+            axum::routing::put(update_account).delete(delete_account),
+        )
         .route("/api/messages", get(search))
         .route("/api/messages/{id}", get(message))
         .route("/api/messages/{id}/flags", post(flags))
@@ -179,4 +187,52 @@ async fn prepare_reply(
         s.prepare_reply(&id, body.map_err(|_| AppError::Invalid)?.0)
             .await?,
     ))
+}
+
+async fn account_settings(
+    State(s): State<Arc<Service>>,
+    Extension(a): Extension<Access>,
+) -> Result<Json<serde_json::Value>> {
+    require_write(a)?;
+    Ok(Json(
+        serde_json::json!({"accounts":s.account_settings().await?}),
+    ))
+}
+async fn create_account(
+    State(s): State<Arc<Service>>,
+    Extension(a): Extension<Access>,
+    body: std::result::Result<
+        Json<crate::account_settings::AccountInput>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Result<Json<crate::account_settings::AccountSettings>> {
+    require_write(a)?;
+    Ok(Json(
+        s.save_account(None, body.map_err(|_| AppError::Invalid)?.0)
+            .await?,
+    ))
+}
+async fn update_account(
+    State(s): State<Arc<Service>>,
+    Extension(a): Extension<Access>,
+    Path(id): Path<String>,
+    body: std::result::Result<
+        Json<crate::account_settings::AccountInput>,
+        axum::extract::rejection::JsonRejection,
+    >,
+) -> Result<Json<crate::account_settings::AccountSettings>> {
+    require_write(a)?;
+    Ok(Json(
+        s.save_account(Some(&id), body.map_err(|_| AppError::Invalid)?.0)
+            .await?,
+    ))
+}
+async fn delete_account(
+    State(s): State<Arc<Service>>,
+    Extension(a): Extension<Access>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>> {
+    require_write(a)?;
+    s.delete_account(&id).await?;
+    Ok(Json(serde_json::json!({"deleted":true})))
 }

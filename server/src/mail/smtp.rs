@@ -85,8 +85,11 @@ fn build_message(account: &MailAccount, mail: &OutgoingMail) -> Result<Message, 
     if mail.body_text.len() > MAX_MESSAGE_BYTES {
         return Err(MailError::TooLarge);
     }
+    let sender = account
+        .sender(&mail.from_address)
+        .ok_or_else(|| MailError::InvalidInput("发件地址不属于此账户".into()))?;
     let mut builder = Message::builder()
-        .from(address(&account.email)?)
+        .from(address(&sender)?)
         .subject(&mail.subject)
         .message_id(Some(message_id(&mail.message_id)?));
     for value in &mail.to {
@@ -125,6 +128,7 @@ mod tests {
         MailAccount {
             id: "test".into(),
             email: "sender@example.com".into(),
+            aliases: vec![],
             imap_host: "localhost".into(),
             imap_port: 993,
             smtp_host: "localhost".into(),
@@ -134,6 +138,7 @@ mod tests {
     }
     fn outgoing() -> OutgoingMail {
         OutgoingMail {
+            from_address: "sender@example.com".into(),
             to: vec!["recipient@example.com".into()],
             cc: vec![],
             subject: "回复证书".into(),
@@ -142,6 +147,23 @@ mod tests {
             references: vec!["root@example.com".into()],
             message_id: "fixed@example.com".into(),
         }
+    }
+    #[test]
+    fn alias_is_used_for_header_and_envelope_without_changing_login() {
+        let mut account = account();
+        account.aliases = vec!["support@example.com".into()];
+        let mut mail = outgoing();
+        mail.from_address = "support@example.com".into();
+        let message = build_message(&account, &mail).unwrap();
+        let raw = String::from_utf8(message.formatted()).unwrap();
+        assert!(raw.contains("From: support@example.com\r\n"));
+        assert_eq!(
+            message.envelope().from().unwrap().to_string(),
+            "support@example.com"
+        );
+        assert_eq!(account.email, "sender@example.com");
+        mail.from_address = "stranger@example.com".into();
+        assert!(build_message(&account, &mail).is_err());
     }
     #[test]
     fn stable_message_id_and_reply_chain() {

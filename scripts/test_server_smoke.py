@@ -84,13 +84,13 @@ class ServerSmokeTests(unittest.TestCase):
             raise AssertionError(f'服务退出码异常: {cls.server.returncode}')
 
     @classmethod
-    def request(cls, path, token=READ_TOKEN, payload=None, origin=None):
+    def request(cls, path, token=READ_TOKEN, payload=None, origin=None, method=None):
         headers = {'Authorization': 'Bearer ' + token}
         if origin:
             headers['Origin'] = origin
         if payload is not None:
             headers['Content-Type'] = 'application/json'
-        request = urllib.request.Request(cls.url + path, headers=headers,
+        request = urllib.request.Request(cls.url + path, headers=headers, method=method,
             data=None if payload is None else json.dumps(payload).encode())
         with urllib.request.urlopen(request, timeout=5) as response:
             return json.load(response)
@@ -181,6 +181,42 @@ class ServerSmokeTests(unittest.TestCase):
         self.assertEqual(preview['body_text'], body['body_text'])
         self.assertEqual(preview['status'], 'prepared')
         self.assertEqual(self.request(route, token=WRITE_TOKEN, payload=body), preview)
+
+    def test_manage_multiple_accounts_without_touching_remote_mail(self):
+        route = '/api/account-settings'
+        for method in ['GET', 'POST']:
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.request(route, method=method, payload={} if method == 'POST' else None)
+            self.assertEqual(error.exception.code, 403)
+        created = []
+        try:
+            for index in range(2):
+                draft = {'email': f'managed{index}@example.com', 'display_name': f'测试 {index}',
+                         'imap_host': '127.0.0.1', 'imap_port': 1,
+                         'smtp_host': '127.0.0.1', 'smtp_port': 1, 'folders': ['INBOX'],
+                         'password': 'test-only'}
+                account = self.request(route, token=WRITE_TOKEN, payload=draft)
+                created.append(account['id'])
+                self.assertNotIn('password', account)
+                self.assertNotIn('credential', account)
+            self.assertEqual(len(set(created)), 2)
+            rows = self.request(route, token=WRITE_TOKEN)['accounts']
+            self.assertTrue(set(created).issubset({a['id'] for a in rows}))
+            row = next(a for a in rows if a['id'] == created[0])
+            row.pop('id')
+            row['display_name'] = '已更新'
+            row['password'] = None
+            updated = self.request(route + '/' + created[0], token=WRITE_TOKEN,
+                                   payload=row, method='PUT')
+            self.assertEqual(updated['display_name'], '已更新')
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.request(route + '/' + created[0], method='DELETE')
+            self.assertEqual(error.exception.code, 403)
+        finally:
+            for account_id in created:
+                self.assertTrue(self.request(route + '/' + account_id, token=WRITE_TOKEN,
+                                             method='DELETE')['deleted'])
+        self.assertEqual([a['id'] for a in self.request(route, token=WRITE_TOKEN)['accounts']], ['work'])
 
 
 if __name__ == '__main__':

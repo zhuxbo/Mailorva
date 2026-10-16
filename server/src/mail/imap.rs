@@ -29,6 +29,12 @@ fn unavailable() -> MailError {
 }
 
 impl ImapPool {
+    pub(super) async fn invalidate_account(&self, id: &str) {
+        self.connections
+            .lock()
+            .await
+            .retain(|key, _| !key.starts_with(&format!("{id}\0")));
+    }
     async fn run<T: Send>(
         &self,
         account: &MailAccount,

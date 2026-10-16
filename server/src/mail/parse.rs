@@ -67,6 +67,17 @@ pub(super) fn message(
         to_addresses: addresses(msg.to()),
         cc_addresses: addresses(msg.cc()),
         reply_to_addresses: addresses(msg.reply_to()),
+        delivery_addresses: ["X-Original-To", "Delivered-To", "Envelope-To"]
+            .iter()
+            .flat_map(|name| msg.header_values(*name))
+            .filter_map(|value| value.as_text())
+            .flat_map(|value| {
+                mail_parser::MessageParser::default()
+                    .parse(format!("To: {value}\r\n\r\n").as_bytes())
+                    .map(|m| addresses(m.to()))
+                    .unwrap_or_default()
+            })
+            .collect(),
         body_text,
         message_id: msg.message_id().map(str::to_owned),
         references,
@@ -123,6 +134,15 @@ mod tests {
         assert!(msg.reply_to_addresses.is_empty());
     }
 
+    #[test]
+    fn delivery_headers_preserve_hidden_recipient_addresses() {
+        let raw = b"From: sender@example.com\r\nTo: other@example.com\r\nDelivered-To: hidden@example.com\r\nX-Original-To: Original <alias@example.com>\r\n\r\nhello";
+        let msg = message(raw, 1, 7, vec![]).unwrap();
+        assert_eq!(
+            msg.delivery_addresses,
+            ["alias@example.com", "hidden@example.com"]
+        );
+    }
     #[test]
     fn attachments_are_decoded_and_not_used_as_body() {
         let raw = b"MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=X\r\n\r\n--X\r\nContent-Type: text/plain\r\nContent-Disposition: attachment; filename=note.txt\r\nContent-Transfer-Encoding: base64\r\n\r\naGVsbG8=\r\n--X\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nreal body\r\n--X--\r\n";

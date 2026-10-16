@@ -45,7 +45,7 @@ fn tools() -> Vec<Tool> {
         ("get_attachment","获取附件 base64，最大 10 MiB",json!({"id":text,"index":{"type":"integer","minimum":0}}),vec!["id","index"]),
         ("set_flags","设置已读或星标，需要可写令牌",json!({"id":text,"seen":{"type":"boolean"},"flagged":{"type":"boolean"}}),vec!["id"]),
         ("move","将邮件移动到同一账户目标文件夹，需要可写令牌；失败后不要自动重试",json!({"id":text,"destination":text}),vec!["id","destination"]),
-        ("prepare_send","准备发送操作；operation_id 必须唯一且同内容重放。准备后检查收件人与正文再调用 send_prepared",json!({"operation_id":text,"account_id":text,"to":array,"cc":array,"subject":text,"body_text":text,"reply_to_id":text}),vec!["operation_id","account_id","to","subject","body_text"]),
+        ("prepare_send","准备发送操作；operation_id 必须唯一且同内容重放。准备后检查收件人与正文再调用 send_prepared",json!({"operation_id":text,"account_id":text,"to":array,"cc":array,"subject":text,"body_text":text,"reply_to_id":text,"from_address":text}),vec!["operation_id","account_id","to","subject","body_text"]),
         ("send_prepared","执行已准备发送；同一 operation_id 永不重复发送，unknown 请人工检查发件箱",json!({"operation_id":text}),vec!["operation_id"]),
         ("get_send_status","查询发送结果 prepared/sending/sent/failed/unknown/expired",json!({"operation_id":text}),vec!["operation_id"]),
     ].into_iter().map(|(name,description,properties,required)| Tool::new(name,description,json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}).as_object().unwrap().clone())).collect()

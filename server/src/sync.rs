@@ -8,14 +8,11 @@ use tokio_util::sync::CancellationToken;
 impl Service {
     pub async fn sync_account(&self, account_id: &str) -> Result<()> {
         let _guard = self.account_lock(account_id).await;
-        let account = self
-            .config
-            .mail_account(account_id)
-            .map_err(|_| crate::error::AppError::Unavailable)?;
+        let account = self.mail_account(account_id).await?;
         let cfg = self
-            .config
-            .accounts
-            .iter()
+            .account_settings()
+            .await?
+            .into_iter()
             .find(|a| a.id == account_id)
             .ok_or(crate::error::AppError::NotFound)?;
         let since = now() - RETENTION_SECONDS;
@@ -80,8 +77,19 @@ impl Service {
         Ok(())
     }
     pub async fn sync_once(&self) {
-        for account in &self.config.accounts {
+        let Ok(accounts) = self.account_settings().await else {
+            return;
+        };
+        for account in accounts {
             let success = self.sync_account(&account.id).await.is_ok();
+            let _guard = self.account_lock(&account.id).await;
+            let Ok(current_accounts) = self.account_settings().await else {
+                tracing::error!("无法读取账户配置");
+                continue;
+            };
+            if !current_accounts.iter().any(|a| a.id == account.id) {
+                continue;
+            }
             if self.db.set_status(&account.id, success).await.is_err() {
                 tracing::error!("无法保存同步状态");
             }

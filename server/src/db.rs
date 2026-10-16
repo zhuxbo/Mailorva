@@ -68,6 +68,7 @@ impl Database {
             to_addresses: mail.to_addresses,
             cc_addresses: mail.cc_addresses,
             reply_to_addresses: mail.reply_to_addresses,
+            delivery_addresses: mail.delivery_addresses,
             received_at: model::timestamp(mail.received_at),
             body_preview: mail.body_text.chars().take(180).collect(),
             body_text: mail.body_text,

@@ -12,6 +12,8 @@ pub struct Message {
     pub cc_addresses: Vec<String>,
     #[serde(default)]
     pub reply_to_addresses: Vec<String>,
+    #[serde(default)]
+    pub delivery_addresses: Vec<String>,
     pub received_at: String,
     pub body_preview: String,
     pub body_text: String,
@@ -26,6 +28,8 @@ pub struct Message {
 }
 #[derive(Serialize)]
 pub struct MessageSummary {
+    pub cc_addresses: Vec<String>,
+    pub delivery_addresses: Vec<String>,
     pub id: String,
     pub account_id: String,
     pub account_email: String,
@@ -40,6 +44,8 @@ pub struct MessageSummary {
 impl From<Message> for MessageSummary {
     fn from(m: Message) -> Self {
         Self {
+            cc_addresses: m.cc_addresses,
+            delivery_addresses: m.delivery_addresses,
             id: m.id,
             account_id: m.account_id,
             account_email: m.account_email,

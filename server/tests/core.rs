@@ -24,9 +24,13 @@ struct Fake {
     outgoing: std::sync::Mutex<Vec<(String, OutgoingMail)>>,
     moves: AtomicUsize,
     attachments: AtomicUsize,
+    invalidations: AtomicUsize,
 }
 #[async_trait]
 impl MailTransport for Fake {
+    async fn invalidate_account(&self, _: &str) {
+        self.invalidations.fetch_add(1, Ordering::SeqCst);
+    }
     async fn snapshot(&self, _: &MailAccount, _: &str, _: i64) -> Result<MailboxState, MailError> {
         if self.fail.load(Ordering::SeqCst) == u32::MAX {
             std::future::pending::<()>().await;
@@ -105,6 +109,7 @@ fn mail(uid: u32, body: &str, date: i64) -> MailMessage {
         to_addresses: vec!["me@example.com".into()],
         cc_addresses: vec!["copy@example.com".into()],
         reply_to_addresses: vec![],
+        delivery_addresses: vec![],
         body_text: body.into(),
         message_id: Some(format!("<{uid}@example.com>")),
         references: vec![],
@@ -243,6 +248,7 @@ fn rejects_more_than_ten_accounts() {
 }
 fn outgoing(id: &str) -> PrepareSend {
     PrepareSend {
+        from_address: None,
         operation_id: id.into(),
         account_id: "a".into(),
         to: vec!["target@example.com".into()],
@@ -734,4 +740,585 @@ async fn mcp_list_accounts_exposes_current_request_write_permission() {
             serde_json::from_str(body["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
         assert_eq!(value["can_write"], can_write);
     }
+}
+
+fn account_input(email: &str) -> Value {
+    json!({"email":email,"display_name":"工作邮箱","imap_host":"imap.example.com","imap_port":993,"smtp_host":"smtp.example.com","smtp_port":465,"folders":["INBOX"],"password":"new-secret"})
+}
+#[tokio::test]
+async fn account_management_empty_boot_crud_and_restart() {
+    use secrecy::ExposeSecret;
+    let mut f = Fixture::new(true);
+    f.config.accounts.clear();
+    let s = f.service().await;
+    assert!(s.account_settings().await.unwrap().is_empty());
+    let app = api::router(s.clone()).unwrap();
+    let token = "w".repeat(32);
+    let (status, account) = http(
+        app.clone(),
+        "POST",
+        "/api/account-settings",
+        Some(&token),
+        None,
+        account_input("one@example.com"),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(!account.to_string().contains("password"));
+    assert!(!account.to_string().contains("secret"));
+    let id = account["id"].as_str().unwrap();
+    let path = format!("/api/account-settings/{id}");
+    for password in [Value::Null, json!("")] {
+        let mut edit = account_input("one@example.com");
+        edit["password"] = password;
+        edit["display_name"] = json!("新名称");
+        assert_eq!(
+            http(app.clone(), "PUT", &path, Some(&token), None, edit)
+                .await
+                .0,
+            200
+        );
+        assert_eq!(
+            s.mail_account(id).await.unwrap().password.expose_secret(),
+            "new-secret"
+        );
+    }
+    let mut edit = account_input("one@example.com");
+    edit.as_object_mut().unwrap().remove("password");
+    assert_eq!(
+        http(app.clone(), "PUT", &path, Some(&token), None, edit.clone())
+            .await
+            .0,
+        200
+    );
+    edit["email"] = json!("changed@example.com");
+    assert_eq!(
+        http(app.clone(), "PUT", &path, Some(&token), None, edit)
+            .await
+            .0,
+        400
+    );
+    let restarted = f.service().await;
+    assert_eq!(restarted.account_settings().await.unwrap().len(), 1);
+    assert_eq!(
+        restarted
+            .mail_account(id)
+            .await
+            .unwrap()
+            .password
+            .expose_secret(),
+        "new-secret"
+    );
+    drop(restarted);
+    assert_eq!(
+        http(
+            app.clone(),
+            "DELETE",
+            &path,
+            Some(&token),
+            None,
+            json!(null)
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        http(
+            app.clone(),
+            "PUT",
+            &path,
+            Some(&token),
+            None,
+            account_input("one@example.com")
+        )
+        .await
+        .0,
+        404
+    );
+    assert!(f
+        .service()
+        .await
+        .account_settings()
+        .await
+        .unwrap()
+        .is_empty());
+    let (_, replacement) = http(
+        app,
+        "POST",
+        "/api/account-settings",
+        Some(&token),
+        None,
+        account_input("one@example.com"),
+    )
+    .await;
+    assert_ne!(replacement["id"], account["id"]);
+}
+#[tokio::test]
+async fn account_management_authorization_validation_and_multiple_accounts() {
+    let f = Fixture::new(false);
+    let s = f.service().await;
+    let app = api::router(s.clone()).unwrap();
+    let read = "r".repeat(32);
+    let write = "w".repeat(32);
+    for (method, path) in [
+        ("GET", "/api/account-settings"),
+        ("POST", "/api/account-settings"),
+        ("PUT", "/api/account-settings/a"),
+        ("DELETE", "/api/account-settings/a"),
+    ] {
+        assert_eq!(
+            http(
+                app.clone(),
+                method,
+                path,
+                Some(&read),
+                None,
+                account_input("one@example.com")
+            )
+            .await
+            .0,
+            403
+        );
+    }
+    assert_eq!(
+        http(
+            app.clone(),
+            "POST",
+            "/api/account-settings",
+            Some(&write),
+            None,
+            account_input("A@EXAMPLE.COM")
+        )
+        .await
+        .0,
+        409
+    );
+    for (field, value) in [
+        ("email", json!("invalid")),
+        ("imap_host", json!("https://host")),
+        ("smtp_port", json!(0)),
+        ("password", json!(null)),
+        ("folders", json!([])),
+        ("folders", json!(["INBOX", "INBOX"])),
+    ] {
+        let mut input = account_input("one@example.com");
+        input[field] = value;
+        assert_eq!(
+            http(
+                app.clone(),
+                "POST",
+                "/api/account-settings",
+                Some(&write),
+                None,
+                input
+            )
+            .await
+            .0,
+            400,
+            "{field}"
+        );
+    }
+    for i in 0..8 {
+        assert_eq!(
+            http(
+                app.clone(),
+                "POST",
+                "/api/account-settings",
+                Some(&write),
+                None,
+                account_input(&format!("{i}@example.com"))
+            )
+            .await
+            .0,
+            200
+        );
+    }
+    assert_eq!(s.account_settings().await.unwrap().len(), 10);
+    assert_eq!(
+        http(
+            app,
+            "POST",
+            "/api/account-settings",
+            Some(&write),
+            None,
+            account_input("overflow@example.com")
+        )
+        .await
+        .0,
+        400
+    );
+}
+#[tokio::test]
+async fn deletion_cleans_cache_and_cancels_send_without_losing_idempotency() {
+    let f = Fixture::new(true);
+    let s = f.service().await;
+    s.sync_account("a").await.unwrap();
+    s.sync_account("b").await.unwrap();
+    s.prepare_send(outgoing("delete-send")).await.unwrap();
+    s.delete_account("a").await.unwrap();
+    assert_eq!(s.db.search(SearchQuery::default()).await.unwrap().total, 3);
+    assert!(s.db.cursor("a", "INBOX").await.unwrap().is_none());
+    assert!(s.sync_account("a").await.is_err());
+    assert_eq!(
+        s.send_prepared("delete-send").await.unwrap().status,
+        "cancelled"
+    );
+    assert_eq!(
+        s.prepare_send(outgoing("delete-send"))
+            .await
+            .unwrap()
+            .status,
+        "cancelled"
+    );
+    assert_eq!(f.fake.sends.load(Ordering::SeqCst), 0);
+    let restarted = f.service().await;
+    assert_eq!(restarted.account_settings().await.unwrap().len(), 1);
+}
+#[tokio::test]
+async fn account_change_serializes_with_queued_sync_and_does_not_revive_deleted_account() {
+    let f = Fixture::new(true);
+    let s = f.service().await;
+    let guard = s.account_lock("a").await;
+    let deleting = tokio::spawn({
+        let s = s.clone();
+        async move { s.delete_account("a").await }
+    });
+    wait_for_account_waiters(&guard, 1).await;
+    let syncing = tokio::spawn({
+        let s = s.clone();
+        async move { s.sync_account("a").await }
+    });
+    wait_for_account_waiters(&guard, 2).await;
+    drop(guard);
+    deleting.await.unwrap().unwrap();
+    assert!(syncing.await.unwrap().is_err());
+    assert!(s.db.cursor("a", "INBOX").await.unwrap().is_none());
+    assert_eq!(s.db.search(SearchQuery::default()).await.unwrap().total, 0);
+}
+#[tokio::test]
+async fn folder_and_password_edits_persist_without_stale_cache() {
+    use secrecy::ExposeSecret;
+    let f = Fixture::new(true);
+    let s = f.service().await;
+    s.sync_account("a").await.unwrap();
+    let mut input = account_input("a@example.com");
+    input["folders"] = json!(["Archive"]);
+    s.save_account(Some("a"), serde_json::from_value(input).unwrap())
+        .await
+        .unwrap();
+    assert!(s.db.cursor("a", "INBOX").await.unwrap().is_none());
+    assert_eq!(s.db.search(SearchQuery::default()).await.unwrap().total, 0);
+    assert_eq!(
+        s.mail_account("a").await.unwrap().password.expose_secret(),
+        "new-secret"
+    );
+    assert_eq!(f.fake.invalidations.load(Ordering::SeqCst), 1);
+    let restarted = f.service().await;
+    assert_eq!(
+        restarted.account_settings().await.unwrap()[0].folders,
+        vec!["Archive"]
+    );
+    assert_eq!(
+        restarted
+            .mail_account("a")
+            .await
+            .unwrap()
+            .password
+            .expose_secret(),
+        "new-secret"
+    );
+}
+
+#[tokio::test]
+async fn first_account_migration_cleans_removed_accounts_and_folders_atomically() {
+    let mut f = Fixture::new(true);
+    f.config.accounts[0].folders.push("Archive".into());
+    let legacy = f.service().await;
+    legacy.sync_account("a").await.unwrap();
+    legacy.sync_account("b").await.unwrap();
+    legacy.db.set_status("a", true).await.unwrap();
+    legacy.db.set_status("b", true).await.unwrap();
+    let mut removed_account = outgoing("migration-removed-account");
+    removed_account.account_id = "b".into();
+    legacy.prepare_send(removed_account).await.unwrap();
+    let mut removed_folder = outgoing("migration-removed-folder");
+    removed_folder.reply_to_id = Some(format!("a:{}:1:1", hex::encode("Archive")));
+    legacy.prepare_send(removed_folder).await.unwrap();
+    legacy
+        .prepare_send(outgoing("migration-kept"))
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE account_configuration")
+        .execute(&legacy.db.pool)
+        .await
+        .unwrap();
+    legacy.db.pool.close().await;
+    drop(legacy);
+
+    f.config.accounts.truncate(1);
+    f.config.accounts[0].folders = vec!["INBOX".into()];
+    let migrated = f.service().await;
+    let result = migrated.db.search(SearchQuery::default()).await.unwrap();
+    assert_eq!(result.total, 3);
+    assert!(result
+        .items
+        .iter()
+        .all(|m| m.account_id == "a" && m.folder == "INBOX"));
+    for (account, folder) in [("a", "Archive"), ("b", "INBOX")] {
+        assert!(migrated.db.cursor(account, folder).await.unwrap().is_none());
+        assert!(migrated
+            .db
+            .message(&format!("{account}:{}:1:1", hex::encode(folder)))
+            .await
+            .is_err());
+    }
+    assert_eq!(migrated.db.statuses().await.unwrap().len(), 1);
+    for id in ["migration-removed-account", "migration-removed-folder"] {
+        assert_eq!(
+            migrated.send_prepared(id).await.unwrap().status,
+            "cancelled"
+        );
+        let retained: (String, String) =
+            sqlx::query_as("SELECT payload_hash,payload FROM send_operations WHERE id=?")
+                .bind(id)
+                .fetch_one(&migrated.db.pool)
+                .await
+                .unwrap();
+        assert!(!retained.0.is_empty());
+        assert!(retained.1.is_empty());
+    }
+    assert_eq!(
+        migrated.send_status("migration-kept").await.unwrap().status,
+        "prepared"
+    );
+    migrated.db.pool.close().await;
+    drop(migrated);
+
+    // Once imported, even an empty old config cannot erase managed accounts or their cache.
+    f.config.accounts.clear();
+    let restarted = f.service().await;
+    assert_eq!(restarted.account_settings().await.unwrap().len(), 1);
+    assert_eq!(
+        restarted
+            .db
+            .search(SearchQuery::default())
+            .await
+            .unwrap()
+            .total,
+        3
+    );
+    assert_eq!(
+        restarted
+            .send_status("migration-kept")
+            .await
+            .unwrap()
+            .status,
+        "prepared"
+    );
+}
+
+#[tokio::test]
+async fn first_account_migration_to_empty_clears_legacy_data_and_stays_empty() {
+    let mut f = Fixture::new(true);
+    let old_config = f.config.clone();
+    let legacy = f.service().await;
+    legacy.sync_account("a").await.unwrap();
+    legacy.db.set_status("a", true).await.unwrap();
+    legacy
+        .prepare_send(outgoing("migration-empty"))
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE account_configuration")
+        .execute(&legacy.db.pool)
+        .await
+        .unwrap();
+    legacy.db.pool.close().await;
+    drop(legacy);
+
+    f.config.accounts.clear();
+    let migrated = f.service().await;
+    assert!(migrated.account_settings().await.unwrap().is_empty());
+    assert_eq!(
+        migrated
+            .db
+            .search(SearchQuery::default())
+            .await
+            .unwrap()
+            .total,
+        0
+    );
+    assert!(migrated.db.cursor("a", "INBOX").await.unwrap().is_none());
+    assert!(migrated.db.statuses().await.unwrap().is_empty());
+    assert_eq!(
+        migrated
+            .send_status("migration-empty")
+            .await
+            .unwrap()
+            .status,
+        "cancelled"
+    );
+    migrated.db.pool.close().await;
+    drop(migrated);
+
+    f.config = old_config;
+    let restarted = f.service().await;
+    assert!(restarted.account_settings().await.unwrap().is_empty());
+    assert_eq!(
+        restarted
+            .prepare_send(outgoing("migration-empty"))
+            .await
+            .unwrap()
+            .status,
+        "cancelled"
+    );
+}
+
+#[tokio::test]
+async fn missing_legacy_secret_reference_records_sync_error() {
+    let f = Fixture::new(false);
+    let s = f.service().await;
+    std::fs::remove_file(f._temp.path().join("password")).unwrap();
+    s.sync_once().await;
+    let statuses = s.db.statuses().await.unwrap();
+    assert_eq!(statuses.len(), 2);
+    assert!(statuses
+        .iter()
+        .all(|status| status.status == "error" && status.error.is_some()));
+    s.delete_account("a").await.unwrap();
+    s.sync_once().await;
+    let statuses = s.db.statuses().await.unwrap();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].account_id, "b");
+    assert_eq!(statuses[0].status, "error");
+}
+
+#[tokio::test]
+async fn alias_reply_preserves_login_account_and_rejects_unconfigured_sender() {
+    let f = Fixture::new(false);
+    let s = f.service().await;
+    let mut edit = account_input("a@example.com");
+    edit["aliases"] = json!(["support@example.com", "billing@example.com"]);
+    s.save_account(Some("a"), serde_json::from_value(edit).unwrap())
+        .await
+        .unwrap();
+    let mut original = mail(88, "Alias message", now());
+    original.to_addresses = vec!["SUPPORT@example.com".into()];
+    s.db.put("a", "a@example.com", "INBOX", 1, original)
+        .await
+        .unwrap();
+    let id =
+        s.db.search(SearchQuery::default())
+            .await
+            .unwrap()
+            .items
+            .remove(0)
+            .id;
+    let app = api::router(s.clone()).unwrap();
+    let path = format!("/api/messages/{id}/reply/prepare");
+    let token = "w".repeat(32);
+    let (code, preview) = http(
+        app.clone(),
+        "POST",
+        &path,
+        Some(&token),
+        None,
+        json!({"operation_id":"alias-reply","body_text":"Received"}),
+    )
+    .await;
+    assert_eq!(code, 200, "{preview}");
+    assert_eq!(preview["account_email"], "support@example.com");
+    assert_eq!(preview["from_address"], "support@example.com");
+    s.send_prepared("alias-reply").await.unwrap();
+    assert_eq!(
+        f.fake.outgoing.lock().unwrap()[0].1.from_address,
+        "support@example.com"
+    );
+    assert_eq!(f.fake.outgoing.lock().unwrap()[0].0, "a");
+    let (code, _) = http(app.clone(), "POST", &path, Some(&token), None,
+        json!({"operation_id":"spoof","body_text":"Received","from_address":"attacker@example.com"})).await;
+    assert_eq!(code, 400);
+    let (code, preview) = http(app, "POST", &path, Some(&token), None,
+        json!({"operation_id":"explicit-alias","body_text":"Received","from_address":"billing@example.com"})).await;
+    assert_eq!(code, 200, "{preview}");
+    assert_eq!(preview["from_address"], "billing@example.com");
+}
+
+#[tokio::test]
+async fn alias_removal_blocks_prepared_send_and_omitted_aliases_preserve_settings() {
+    let f = Fixture::new(false);
+    let s = f.service().await;
+    let mut edit = account_input("a@example.com");
+    edit["aliases"] = json!(["support@example.com"]);
+    s.save_account(Some("a"), serde_json::from_value(edit.clone()).unwrap())
+        .await
+        .unwrap();
+    let mut input = outgoing("pinned-alias");
+    input.from_address = Some("support@example.com".into());
+    s.prepare_send(input).await.unwrap();
+    s.save_account(
+        Some("a"),
+        serde_json::from_value(account_input("a@example.com")).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        s.mail_account("a").await.unwrap().aliases,
+        ["support@example.com"]
+    );
+    edit["aliases"] = json!([]);
+    s.save_account(Some("a"), serde_json::from_value(edit).unwrap())
+        .await
+        .unwrap();
+    assert!(s.send_prepared("pinned-alias").await.is_err());
+    assert_eq!(f.fake.sends.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        s.send_status("pinned-alias").await.unwrap().status,
+        "prepared"
+    );
+}
+
+#[tokio::test]
+async fn alias_validation_and_delivery_fallback_are_account_scoped() {
+    let f = Fixture::new(false);
+    let s = f.service().await;
+    for aliases in [
+        json!(["A@example.com"]),
+        json!(["alias@example.com", "ALIAS@example.com"]),
+        json!(["bad\r\nBcc: attacker@example.com"]),
+    ] {
+        let mut edit = account_input("a@example.com");
+        edit["aliases"] = aliases;
+        assert!(s
+            .save_account(Some("a"), serde_json::from_value(edit).unwrap())
+            .await
+            .is_err());
+    }
+    let mut edit = account_input("a@example.com");
+    edit["aliases"] = json!(["hidden@example.com"]);
+    s.save_account(Some("a"), serde_json::from_value(edit).unwrap())
+        .await
+        .unwrap();
+    let mut original = mail(90, "Bcc", now());
+    original.to_addresses = vec!["other@example.com".into()];
+    original.delivery_addresses = vec!["hidden@example.com".into()];
+    s.db.put("a", "a@example.com", "INBOX", 1, original)
+        .await
+        .unwrap();
+    let summary =
+        s.db.search(SearchQuery::default())
+            .await
+            .unwrap()
+            .items
+            .remove(0);
+    assert_eq!(summary.delivery_addresses, ["hidden@example.com"]);
+    let parent = s.db.message(&summary.id).await.unwrap();
+    assert_eq!(
+        s.mail_account("a").await.unwrap().reply_sender(&parent),
+        "hidden@example.com"
+    );
+    assert_eq!(
+        s.mail_account("b").await.unwrap().reply_sender(&parent),
+        "b@example.com"
+    );
 }

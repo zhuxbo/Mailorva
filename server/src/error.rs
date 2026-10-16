@@ -19,12 +19,14 @@ pub enum AppError {
     Internal,
     #[error("同一操作编号不能用于不同内容")]
     Conflict,
+    #[error("该邮箱账号已存在")]
+    AccountExists,
 }
 impl AppError {
     pub fn code(&self) -> &'static str {
         match self {
             Self::Unauthorized | Self::Forbidden => "unauthorized",
-            Self::Invalid | Self::Conflict => "invalid_request",
+            Self::Invalid | Self::Conflict | Self::AccountExists => "invalid_request",
             Self::NotFound => "not_found",
             Self::Unavailable => "unavailable",
             Self::Internal => "internal",
@@ -37,7 +39,7 @@ impl IntoResponse for AppError {
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
             Self::Invalid => StatusCode::BAD_REQUEST,
-            Self::Conflict => StatusCode::CONFLICT,
+            Self::Conflict | Self::AccountExists => StatusCode::CONFLICT,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,

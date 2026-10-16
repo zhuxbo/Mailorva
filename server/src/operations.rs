@@ -12,6 +12,8 @@ use sqlx::Row;
 pub struct PrepareSend {
     pub operation_id: String,
     pub account_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_address: Option<String>,
     pub to: Vec<String>,
     #[serde(default)]
     pub cc: Vec<String>,
@@ -22,11 +24,13 @@ pub struct PrepareSend {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrepareReply {
+    pub from_address: Option<String>,
     pub operation_id: String,
     pub body_text: String,
 }
 #[derive(Serialize)]
 pub struct ReplyPreview {
+    pub from_address: String,
     #[serde(flatten)]
     pub operation: SendStatus,
     pub account_id: String,
@@ -53,12 +57,11 @@ impl Service {
             return Err(AppError::Invalid);
         }
         let parent = self.db.message(id).await?;
-        let account = self
-            .config
-            .accounts
-            .iter()
-            .find(|a| a.id == parent.account_id)
-            .ok_or(AppError::NotFound)?;
+        let account = self.mail_account(&parent.account_id).await?;
+        let from_address = match input.from_address.as_deref() {
+            Some(value) => account.sender(value).ok_or(AppError::Invalid)?,
+            None => account.reply_sender(&parent),
+        };
         let to = if parent.reply_to_addresses.is_empty() {
             vec![parent.from_address]
         } else {
@@ -76,6 +79,7 @@ impl Service {
         let outgoing = PrepareSend {
             operation_id: input.operation_id,
             account_id: parent.account_id.clone(),
+            from_address: Some(from_address.clone()),
             to: to.clone(),
             cc: vec![],
             subject: subject.clone(),
@@ -84,9 +88,10 @@ impl Service {
         };
         let operation = self.prepare_send(outgoing).await?;
         Ok(ReplyPreview {
+            from_address: from_address.clone(),
             operation,
             account_id: parent.account_id,
-            account_email: account.email.clone(),
+            account_email: from_address,
             to,
             subject,
             body_text: input.body_text,
@@ -101,8 +106,8 @@ impl Service {
         let _lock = self.account_lock(&account_id).await;
         let mut msg = self.db.message(id).await?;
         let a = self
-            .config
             .mail_account(&msg.account_id)
+            .await
             .map_err(|_| AppError::Unavailable)?;
         self.transport
             .set_flags(
@@ -139,8 +144,8 @@ impl Service {
             return Err(AppError::Invalid);
         }
         let a = self
-            .config
             .mail_account(&msg.account_id)
+            .await
             .map_err(|_| AppError::Unavailable)?;
         self.transport
             .move_message(&a, &msg.folder, msg.uid_validity, msg.uid, destination)
@@ -153,8 +158,8 @@ impl Service {
         let _lock = self.account_lock(&account_id).await;
         let msg = self.db.message(id).await?;
         let a = self
-            .config
             .mail_account(&msg.account_id)
+            .await
             .map_err(|_| AppError::Unavailable)?;
         let data = self
             .transport
@@ -167,7 +172,7 @@ impl Service {
             serde_json::json!({"info":data.info,"base64":base64::engine::general_purpose::STANDARD.encode(data.bytes)}),
         )
     }
-    pub async fn prepare_send(&self, input: PrepareSend) -> Result<SendStatus> {
+    pub async fn prepare_send(&self, mut input: PrepareSend) -> Result<SendStatus> {
         if input.operation_id.is_empty()
             || input.operation_id.len() > 128
             || input.to.is_empty()
@@ -183,8 +188,9 @@ impl Service {
                 return Err(AppError::Invalid);
             }
         }
-        let payload = serde_json::to_string(&input)?;
-        let hash = hex::encode(Sha256::digest(payload.as_bytes()));
+        let _lock = self.account_lock(&input.account_id).await;
+        let request_payload = serde_json::to_string(&input)?;
+        let hash = hex::encode(Sha256::digest(request_payload.as_bytes()));
         if let Some(row) = sqlx::query("SELECT payload_hash FROM send_operations WHERE id=?")
             .bind(&input.operation_id)
             .fetch_optional(&self.db.pool)
@@ -195,15 +201,28 @@ impl Service {
             }
             return self.send_status(&input.operation_id).await;
         }
-        self.config
+        let account = self
             .mail_account(&input.account_id)
+            .await
             .map_err(|_| AppError::Invalid)?;
-        if let Some(id) = &input.reply_to_id {
-            let parent = self.db.message(id).await?;
-            if parent.account_id != input.account_id {
-                return Err(AppError::Invalid);
+        let parent = match &input.reply_to_id {
+            Some(id) => {
+                let parent = self.db.message(id).await?;
+                if parent.account_id != input.account_id {
+                    return Err(AppError::Invalid);
+                }
+                Some(parent)
             }
-        }
+            None => None,
+        };
+        input.from_address = Some(match &input.from_address {
+            Some(value) => account.sender(value).ok_or(AppError::Invalid)?,
+            None => parent
+                .as_ref()
+                .map(|p| account.reply_sender(p))
+                .unwrap_or_else(|| account.email.clone()),
+        });
+        let payload = serde_json::to_string(&input)?;
         let message_id = format!("<{}@ai-email.local>", uuid::Uuid::new_v4());
         sqlx::query("INSERT INTO send_operations(id,payload,payload_hash,message_id,status,created_at) VALUES(?,?,?,?,'prepared',?) ON CONFLICT(id) DO NOTHING").bind(&input.operation_id).bind(&payload).bind(&hash).bind(message_id).bind(crate::model::now()).execute(&self.db.pool).await?;
         let row = sqlx::query("SELECT payload_hash FROM send_operations WHERE id=?")
@@ -245,8 +264,8 @@ impl Service {
         }
         // Resolve all fallible local inputs before taking the irreversible send claim.
         let account = self
-            .config
             .mail_account(&input.account_id)
+            .await
             .map_err(|_| AppError::Unavailable)?;
         let parent = match input.reply_to_id {
             Some(ref parent) => Some(self.db.message(parent).await?),
@@ -268,7 +287,12 @@ impl Service {
                 r
             })
             .unwrap_or_default();
+        // Prepared operations pin the sender; removed aliases must never silently fall back.
+        let from_address = account
+            .sender(input.from_address.as_deref().unwrap_or(&account.email))
+            .ok_or(AppError::Invalid)?;
         let mail = OutgoingMail {
+            from_address,
             to: input.to,
             cc: input.cc,
             subject: input.subject,

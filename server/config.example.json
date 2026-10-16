@@ -7,17 +7,5 @@
   "allowed_hosts": ["mail.example.com", "127.0.0.1", "localhost"],
   "sync_interval_seconds": 60,
   "import_history": false,
-  "accounts": [
-    {
-      "id": "work",
-      "email": "you@example.com",
-      "display_name": "工作邮箱",
-      "imap_host": "imap.exmail.qq.com",
-      "imap_port": 993,
-      "smtp_host": "smtp.exmail.qq.com",
-      "smtp_port": 465,
-      "password": { "file": "/etc/ai-email/work-password" },
-      "folders": ["INBOX"]
-    }
-  ]
+  "accounts": []
 }

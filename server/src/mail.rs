@@ -11,11 +11,29 @@ use serde::{Deserialize, Serialize};
 pub struct MailAccount {
     pub id: String,
     pub email: String,
+    pub aliases: Vec<String>,
     pub imap_host: String,
     pub imap_port: u16,
     pub smtp_host: String,
     pub smtp_port: u16,
     pub password: SecretString,
+}
+impl MailAccount {
+    pub fn sender(&self, address: &str) -> Option<String> {
+        std::iter::once(&self.email)
+            .chain(self.aliases.iter())
+            .find(|a| a.eq_ignore_ascii_case(address))
+            .cloned()
+    }
+    pub fn reply_sender(&self, message: &crate::model::Message) -> String {
+        message
+            .to_addresses
+            .iter()
+            .chain(message.cc_addresses.iter())
+            .chain(message.delivery_addresses.iter())
+            .find_map(|a| self.sender(a))
+            .unwrap_or_else(|| self.email.clone())
+    }
 }
 #[derive(Debug)]
 pub struct MailboxState {
@@ -32,6 +50,7 @@ pub struct MailMessage {
     pub to_addresses: Vec<String>,
     pub cc_addresses: Vec<String>,
     pub reply_to_addresses: Vec<String>,
+    pub delivery_addresses: Vec<String>,
     pub body_text: String,
     pub message_id: Option<String>,
     pub references: Vec<String>,
@@ -52,6 +71,7 @@ pub struct AttachmentData {
 }
 #[derive(Clone, Debug)]
 pub struct OutgoingMail {
+    pub from_address: String,
     pub to: Vec<String>,
     pub cc: Vec<String>,
     pub subject: String,
@@ -81,6 +101,7 @@ pub enum MailError {
 }
 #[async_trait]
 pub trait MailTransport: Send + Sync {
+    async fn invalidate_account(&self, _id: &str) {}
     async fn snapshot(
         &self,
         account: &MailAccount,
@@ -136,6 +157,9 @@ pub struct LiveMailTransport {
 
 #[async_trait]
 impl MailTransport for LiveMailTransport {
+    async fn invalidate_account(&self, id: &str) {
+        self.imap.invalidate_account(id).await;
+    }
     async fn snapshot(
         &self,
         account: &MailAccount,

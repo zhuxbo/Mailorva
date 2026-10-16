@@ -1,8 +1,8 @@
 use secrecy::{ExposeSecret, SecretString};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, net::SocketAddr, path::Path};
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretRef {
     pub env: Option<String>,
@@ -30,6 +30,8 @@ pub struct AccountConfig {
     pub id: String,
     pub email: String,
     pub display_name: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
     pub imap_host: String,
     #[serde(default = "imap_port")]
     pub imap_port: u16,
@@ -70,6 +72,7 @@ pub struct Config {
     pub sync_interval_seconds: u64,
     #[serde(default)]
     pub import_history: bool,
+    #[serde(default)]
     pub accounts: Vec<AccountConfig>,
 }
 impl Config {
@@ -84,19 +87,22 @@ impl Config {
             self.bind.ip().is_loopback(),
             "服务必须绑定 loopback，通过 HTTPS 反向代理访问"
         );
-        anyhow::ensure!(
-            !self.accounts.is_empty() && self.accounts.len() <= 10,
-            "账户数量必须为 1 到 10"
-        );
+        anyhow::ensure!(self.accounts.len() <= 10, "账户数量必须为 0 到 10");
         anyhow::ensure!(self.sync_interval_seconds >= 10, "同步间隔不能小于 10 秒");
         let mut ids = HashSet::new();
+        let mut emails = HashSet::new();
         for account in &self.accounts {
+            anyhow::ensure!(
+                crate::account_settings::valid_aliases(&account.email, &account.aliases),
+                "邮箱别名无效或重复"
+            );
             anyhow::ensure!(
                 !account.id.is_empty() && ids.insert(&account.id),
                 "账户 id 不能为空或重复"
             );
             anyhow::ensure!(
-                !account.email.is_empty()
+                emails.insert(account.email.to_lowercase())
+                    && !account.email.is_empty()
                     && !account.imap_host.is_empty()
                     && !account.smtp_host.is_empty(),
                 "账户配置不完整"
@@ -105,7 +111,6 @@ impl Config {
                 !account.folders.is_empty() && account.folders.iter().all(|s| !s.trim().is_empty()),
                 "必须配置同步文件夹"
             );
-            account.password.resolve()?;
         }
         let read = self.read_token.resolve()?;
         let write = self.write_token.resolve()?;
@@ -128,6 +133,7 @@ impl Config {
         Ok(crate::mail::MailAccount {
             id: a.id.clone(),
             email: a.email.clone(),
+            aliases: a.aliases.clone(),
             imap_host: a.imap_host.clone(),
             imap_port: a.imap_port,
             smtp_host: a.smtp_host.clone(),
