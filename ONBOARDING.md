@@ -144,6 +144,20 @@ location = /.well-known/oauth-authorization-server/mail-mcp {
 
 公网验收需分别确认：未认证 MCP 返回带 metadata 地址的 `401`；标准发现 URL 返回正确 issuer；实际助手完成注册、浏览器授权及只读搜索。仅用脚本搜索成功不能代表 dot 接入完成。
 
+## 新邮件事件与 dots
+
+升级服务程序并重启即可启用 Events，无需新增同步配置；保留原 `sync_interval_seconds`。首次启动自动在原 SQLite 中增加事件订阅和待投递表。数据库现包含 Webhook 签名密钥，继续按邮箱凭据保护数据库、WAL、SHM 和备份。服务端需要出站 DNS 和 HTTPS 到接收方提供的公网回调地址；不使用系统 HTTP 代理，不需要额外入站端口。
+
+1. 在插件配置中重新扫描 Mailorva 的 MCP 工具与事件，确认出现 `mail.received`。
+2. 告诉 dots：“监控 Mailorva 新邮件，收到后判断是否需要处理，需要回复时准备草稿并通知我。”也可限定账号 ID 和文件夹。
+3. dots 调用 `events/subscribe` 并提供回调 URL 与 `whsec_` 签名密钥；服务完成签名挑战验证后才保存订阅。只读固定令牌及 OAuth `mail:read` 均可订阅，订阅不增加邮箱写入权限。
+4. 收到新的匹配邮件后，确认接收方收到事件并按要求处理。事件的 `message_id` 用于 `get_message`，不是原邮件的 RFC Message-ID。
+5. 告诉 dots 停止监控，通过 `events/unsubscribe` 取消；订阅最长 24 小时，客户端需按 `refreshBefore` 续订。
+
+公开接口仍为原 MCP 地址，Events 不新增 OAuth scope。`server/discover` 使用 MCP `2026-07-28` 的逐请求元数据和对应 HTTP 头；事件声明、订阅和回调格式参见 [官方接入协议](https://developers.openai.com/plugins/build/mcp-events)。其他助手需实现相同的 Webhook 订阅、挑战验证和 Standard Webhooks 验签；仅连接现有搜索工具不足以接收事件。
+
+验收须区分本地自动测试与真实 dots 联调：自动测试仅使用模拟邮件和本机回调；只有插件发现事件、订阅验证、真实事件接收及取消订阅全部通过，才可认为 dots 接入完成。客户端批处理设置和运行调度也会影响通知时延。
+
 ## 数据与故障处理
 
 - SQLite 存在 `database_path`；目录必须存在且仅服务用户可读写（`0700`）。数据库包含邮件正文及 App 添加的邮箱授权码，WAL/SHM 和备份需同等保护。

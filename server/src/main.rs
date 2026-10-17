@@ -17,6 +17,12 @@ async fn main() -> anyhow::Result<()> {
     let router = mailorva_server::api::router(service.clone())?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let cancellation = tokio_util::sync::CancellationToken::new();
+    let events = tokio::spawn(
+        service
+            .events
+            .clone()
+            .run(service.clone(), cancellation.clone()),
+    );
     let background = tokio::spawn(service.run_sync(cancellation.clone()));
     let signal = cancellation.clone();
     axum::serve(listener, router)
@@ -27,6 +33,7 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     cancellation.cancel();
     background.await?;
+    events.await?;
     Ok(())
 }
 

@@ -103,6 +103,12 @@ pub struct Grant {
     family: String,
 }
 
+impl Grant {
+    pub(crate) fn event_family(&self) -> &str {
+        &self.family
+    }
+}
+
 pub struct OAuth {
     config: OAuthConfig,
     issuer: String,
@@ -131,6 +137,11 @@ impl OAuth {
             store: store::Store::new(pool).await?,
             limits: Mutex::new(HashMap::new()),
         }))
+    }
+    pub(crate) async fn event_grant_active(&self, family: &str) -> Result<bool, AppError> {
+        Ok(sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM oauth_tokens WHERE family=? AND binding=? AND consumed=0 AND refresh_expires_at>?)")
+            .bind(family).bind(&self.binding).bind(crate::model::now())
+            .fetch_one(&self.store.0).await?)
     }
     pub async fn valid_access(&self, token: &str) -> Result<bool, AppError> {
         Ok(self.access(token).await?.is_some())

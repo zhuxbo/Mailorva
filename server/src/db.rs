@@ -32,6 +32,7 @@ impl Database {
             CREATE TABLE IF NOT EXISTS sync_status (account_id TEXT PRIMARY KEY, status TEXT NOT NULL, last_synced_at INTEGER, error TEXT);
             CREATE TABLE IF NOT EXISTS send_operations (id TEXT PRIMARY KEY, payload TEXT NOT NULL, payload_hash TEXT NOT NULL, message_id TEXT NOT NULL, status TEXT NOT NULL, created_at INTEGER NOT NULL);
             UPDATE send_operations SET status='unknown',payload='' WHERE status='sending';").execute(&pool).await?;
+        crate::events::initialize(&pool).await?;
         Ok(Self { pool })
     }
     pub async fn put(
@@ -79,8 +80,17 @@ impl Database {
             uid: mail.uid,
             uid_validity: validity,
         };
+        let mut tx = self.pool.begin().await?;
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE id=?)")
+            .bind(&id)
+            .fetch_one(&mut *tx)
+            .await?;
         sqlx::query("INSERT INTO messages(id,account_id,folder,uid_validity,uid,received_at,search_text,data) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(account_id,folder,uid_validity,uid) DO UPDATE SET received_at=excluded.received_at, search_text=excluded.search_text,data=excluded.data")
-            .bind(id).bind(account).bind(folder).bind(validity).bind(mail.uid).bind(mail.received_at).bind(search).bind(serde_json::to_string(&msg)?).execute(&self.pool).await?;
+            .bind(&id).bind(account).bind(folder).bind(validity).bind(mail.uid).bind(mail.received_at).bind(search).bind(serde_json::to_string(&msg)?).execute(&mut *tx).await?;
+        if !exists {
+            crate::events::enqueue(&mut tx, &msg, mail.received_at).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
     fn from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Message> {
@@ -115,6 +125,14 @@ impl Database {
         Ok(())
     }
     pub async fn cleanup(&self, now: i64) -> Result<u64> {
+        sqlx::query("DELETE FROM event_seen WHERE received_at<?")
+            .bind(now - model::RETENTION_SECONDS)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM event_deliveries WHERE json_extract(body,'$.data.received_at')<?")
+            .bind(model::timestamp(now - model::RETENTION_SECONDS))
+            .execute(&self.pool)
+            .await?;
         sqlx::query("UPDATE send_operations SET payload='',status=CASE WHEN status='prepared' THEN 'expired' ELSE status END WHERE created_at<? AND status!='sending'").bind(now-model::RETENTION_SECONDS).execute(&self.pool).await?;
         Ok(sqlx::query("DELETE FROM messages WHERE received_at<?")
             .bind(now - model::RETENTION_SECONDS)

@@ -3,6 +3,7 @@ pub mod api;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod events;
 pub mod mail;
 pub mod mcp;
 pub mod model;
@@ -16,6 +17,7 @@ pub struct Service {
     pub db: db::Database,
     pub transport: Arc<dyn mail::MailTransport>,
     pub oauth: Option<Arc<oauth::OAuth>>,
+    pub events: Arc<events::Events>,
     account_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     account_changes: Mutex<()>,
 }
@@ -37,6 +39,7 @@ impl Service {
             db,
             transport,
             oauth,
+            events: Arc::new(events::Events::default()),
             account_locks: Mutex::new(HashMap::new()),
             account_changes: Mutex::new(()),
         }))

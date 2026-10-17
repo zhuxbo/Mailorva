@@ -68,6 +68,7 @@ impl Service {
                             mail,
                         )
                         .await?;
+                    self.events.wake.notify_one();
                 }
                 self.db
                     .set_cursor(account_id, folder, snapshot.uid_validity, uid)

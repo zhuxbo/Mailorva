@@ -306,6 +306,13 @@ async fn http(
         .header("content-type", "application/json")
         .header("accept", "application/json, text/event-stream")
         .header("host", "localhost");
+    if let Some(version) =
+        body["params"]["_meta"]["io.modelcontextprotocol/protocolVersion"].as_str()
+    {
+        req = req
+            .header("MCP-Protocol-Version", version)
+            .header("Mcp-Method", body["method"].as_str().unwrap());
+    }
     if let Some(token) = token {
         req = req.header("authorization", format!("Bearer {token}"));
     }
@@ -1334,4 +1341,38 @@ async fn alias_validation_and_delivery_fallback_are_account_scoped() {
         s.mail_account("b").await.unwrap().reply_sender(&parent),
         "b@example.com"
     );
+}
+
+#[tokio::test]
+async fn mcp_events_catalog_and_discovery() {
+    let f = Fixture::new(false);
+    let app = api::router(f.service().await).unwrap();
+    let read = "r".repeat(32);
+    let (_, body) = http(app.clone(), "POST", "/mcp", Some(&read), None,
+        json!({"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}})).await;
+    assert!(
+        body["result"]["capabilities"]["events"].is_object(),
+        "{body}"
+    );
+    let (_, body) = http(app, "POST", "/mcp", Some(&read), None,
+        json!({"jsonrpc":"2.0","id":2,"method":"events/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}})).await;
+    assert_eq!(
+        body["result"]["events"][0]["name"], "mail.received",
+        "{body}"
+    );
+}
+
+#[tokio::test]
+async fn mcp_events_rejects_private_callback_and_unknown_filters() {
+    let f = Fixture::new(false);
+    let app = api::router(f.service().await).unwrap();
+    let read = "r".repeat(32);
+    for (arguments, expected) in [(json!({}), -32015), (json!({"unexpected":true}), -32602)] {
+        let (_, body) = http(app.clone(), "POST", "/mcp", Some(&read), None,
+            json!({"jsonrpc":"2.0","id":2,"method":"events/subscribe","params":{
+                "_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}},
+                "name":"mail.received","arguments":arguments,
+                "delivery":{"mode":"webhook","url":"https://127.0.0.1/callback","secret":"whsec_YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}}})).await;
+        assert_eq!(body["error"]["code"], expected, "{body}");
+    }
 }

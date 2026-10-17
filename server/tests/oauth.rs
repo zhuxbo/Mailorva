@@ -1481,3 +1481,78 @@ async fn reply_status_separates_confirmation_expiry_without_writing() {
         assert_eq!(f.fake.sends.load(Ordering::SeqCst), 0);
     }
 }
+
+#[tokio::test]
+async fn revoked_oauth_grant_removes_queued_event_subscription() {
+    let f = Fixture::new().await;
+    let client = f.register().await;
+    let code = f.code(&client).await;
+    let token = f.token(&client, &code).await;
+    let access = token["access_token"].as_str().unwrap();
+    let (_, catalog) = f.mcp(access, "events/list", json!({})).await;
+    assert_eq!(
+        catalog["result"]["events"][0]["name"], "mail.received",
+        "{catalog}"
+    );
+    let family: String = sqlx::query_scalar("SELECT family FROM oauth_tokens WHERE access_hash=?")
+        .bind(hex::encode(Sha256::digest(access.as_bytes())))
+        .fetch_one(&f.service.db.pool)
+        .await
+        .unwrap();
+    // Seed a verified subscription to isolate revocation from callback verification.
+    // Loopback remains forbidden, so a regression cannot send to a real external receiver.
+    sqlx::query("INSERT INTO event_subscriptions(id,owner,callback,secret,verified_at,created_at,expires_at) VALUES(?,?,?,?,?,?,?)")
+        .bind("sub_revoked").bind(format!("oauth:{family}")).bind("https://127.0.0.1/callback")
+        .bind("whsec_YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=")
+        .bind(now()).bind(now()-10).bind(now()+3600).execute(&f.service.db.pool).await.unwrap();
+    f.service
+        .db
+        .put("a", "me@example.com", "INBOX", 1, mail(99, "test", now()))
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM event_deliveries")
+        .fetch_one(&f.service.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let (status, _, _) = f
+        .request(
+            "POST",
+            "/oauth/revoke",
+            &[("content-type", "application/x-www-form-urlencoded")],
+            form(&[
+                ("client_id", &client),
+                ("token", token["refresh_token"].as_str().unwrap()),
+            ]),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let worker = tokio::spawn(
+        f.service
+            .events
+            .clone()
+            .run(f.service.clone(), cancel.clone()),
+    );
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM event_subscriptions")
+                .fetch_one(&f.service.db.pool)
+                .await
+                .unwrap();
+            if count == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    cancel.cancel();
+    worker.await.unwrap();
+    result.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM event_deliveries")
+        .fetch_one(&f.service.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}

@@ -20,6 +20,7 @@ pub struct Access {
     pub write: bool,
     pub oauth: bool,
     pub grant: Option<crate::oauth::Grant>,
+    pub(crate) event_owner: String,
 }
 #[derive(Clone)]
 struct Auth {
@@ -70,10 +71,18 @@ async fn authenticate(
             return Err(AppError::Unauthorized);
         }
     }
+    let event_owner = match &grant {
+        Some(grant) => format!("oauth:{}", grant.event_family()),
+        None => {
+            use sha2::{Digest, Sha256};
+            format!("token:{}", hex::encode(Sha256::digest(token.as_bytes())))
+        }
+    };
     request.extensions_mut().insert(Access {
         write,
         oauth: oauth_access,
         grant,
+        event_owner,
     });
     Ok(next.run(request).await)
 }
@@ -92,6 +101,9 @@ pub fn router(service: Arc<Service>) -> anyhow::Result<Router> {
         oauth: service.oauth.clone(),
     };
     let mcp = crate::mcp::http_service(service.clone());
+    let mcp = Router::new()
+        .nest_service("/mcp", mcp)
+        .layer(middleware::from_fn(crate::mcp::events_discovery));
     let router = Router::new()
         .route("/api/accounts", get(accounts))
         .route(
@@ -111,7 +123,7 @@ pub fn router(service: Arc<Service>) -> anyhow::Result<Router> {
         .route("/api/send/prepare", post(prepare_send))
         .route("/api/send/{id}/send", post(send))
         .route("/api/send/{id}", get(send_status))
-        .nest_service("/mcp", mcp)
+        .merge(mcp)
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(auth, authenticate))
         .with_state(service.clone());
