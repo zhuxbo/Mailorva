@@ -131,9 +131,35 @@ impl OAuth {
                 .fetch_optional(&self.store.0)
                 .await?;
         let (expires,) = expires.ok_or(AppError::NotFound)?;
-        expire(service, &id, expires).await?;
-        let mut value = serde_json::to_value(service.send_status(&id).await?)?;
+        let send = service.send_status(&id).await?;
+        let (confirmation_expiry,): (Option<i64>,) = sqlx::query_as(
+            "SELECT MAX(expires_at) FROM oauth_requests WHERE kind='reply_chat_confirmation' AND json_extract(data,'$.id')=?",
+        )
+        .bind(&id)
+        .fetch_one(&self.store.0)
+        .await?;
+        let current_time = now();
+        let confirmation_expiry = confirmation_expiry.map(|expiry| expiry.min(expires));
+        let confirmation_status = if send.status != "prepared" {
+            "not_required"
+        } else if expires <= current_time {
+            "expired"
+        } else {
+            match confirmation_expiry {
+                Some(expiry) if expiry > current_time => "pending",
+                Some(_) => "expired",
+                None => "unavailable",
+            }
+        };
+        let mut value = serde_json::to_value(&send)?;
         value["operation_id"] = json!(operation);
+        value["send_status"] = json!(send.status);
+        if send.status == "prepared" && expires <= current_time {
+            value["status"] = json!("expired");
+        }
+        value["confirmation_status"] = json!(confirmation_status);
+        value["reply_expires_at"] = json!(expires);
+        value["confirmation_expires_at"] = json!(confirmation_expiry);
         Ok(value)
     }
 }
@@ -147,13 +173,6 @@ pub(crate) fn router(service: Arc<Service>) -> Router {
             security_headers,
         ))
         .with_state(service)
-}
-async fn expire(service: &Service, id: &str, expiry: i64) -> Result<()> {
-    if expiry <= now() {
-        sqlx::query("UPDATE send_operations SET status='expired',payload='' WHERE id=? AND status='prepared'")
-            .bind(id).execute(&service.db.pool).await?;
-    }
-    Ok(())
 }
 #[derive(Serialize, Deserialize)]
 struct ChatApproval {

@@ -1370,3 +1370,114 @@ async fn oauth_existing_token_schema_migrates_to_readonly() {
         .unwrap();
     assert!(!grant.reply);
 }
+
+#[tokio::test]
+async fn reply_status_separates_confirmation_expiry_without_writing() {
+    for scenario in [
+        "pending",
+        "token_expired",
+        "missing",
+        "reply_expired",
+        "sent",
+        "unknown",
+        "failed",
+        "sending",
+    ] {
+        let f = Fixture::new().await;
+        let token = f.reply_token().await;
+        let access = token["access_token"].as_str().unwrap();
+        f.prepare_reply(access, "status-check").await;
+        match scenario {
+            "token_expired" => {
+                sqlx::query(
+                    "UPDATE oauth_requests SET expires_at=0 WHERE kind='reply_chat_confirmation'",
+                )
+                .execute(&f.service.db.pool)
+                .await
+                .unwrap();
+            }
+            "missing" => {
+                sqlx::query("DELETE FROM oauth_requests WHERE kind='reply_chat_confirmation'")
+                    .execute(&f.service.db.pool)
+                    .await
+                    .unwrap();
+            }
+            "pending" => {}
+            _ => {
+                sqlx::query("UPDATE oauth_replies SET expires_at=0")
+                    .execute(&f.service.db.pool)
+                    .await
+                    .unwrap();
+                if scenario != "reply_expired" {
+                    sqlx::query("UPDATE send_operations SET status=?")
+                        .bind(scenario)
+                        .execute(&f.service.db.pool)
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+        let before: Vec<(String, String)> =
+            sqlx::query_as("SELECT status,payload FROM send_operations")
+                .fetch_all(&f.service.db.pool)
+                .await
+                .unwrap();
+        let credentials_before: Vec<(String, i64)> =
+            sqlx::query_as("SELECT hash,expires_at FROM oauth_requests ORDER BY hash")
+                .fetch_all(&f.service.db.pool)
+                .await
+                .unwrap();
+        for _ in 0..2 {
+            let (_, result) = f
+                .mcp(
+                    access,
+                    "tools/call",
+                    json!({"name":"get_reply_status","arguments":{"operation_id":"status-check"}}),
+                )
+                .await;
+            assert_ne!(result["result"]["isError"], true, "{scenario}: {result}");
+            let value: Value =
+                serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            let (status, send_status, confirmation_status) = match scenario {
+                "pending" => ("prepared", "prepared", "pending"),
+                "token_expired" => ("prepared", "prepared", "expired"),
+                "missing" => ("prepared", "prepared", "unavailable"),
+                "reply_expired" => ("expired", "prepared", "expired"),
+                state => (state, state, "not_required"),
+            };
+            assert_eq!(value["status"], status, "{scenario}");
+            assert_eq!(value["send_status"], send_status, "{scenario}");
+            assert_eq!(
+                value["confirmation_status"], confirmation_status,
+                "{scenario}"
+            );
+            assert_eq!(value["operation_id"], "status-check");
+            assert!(value["reply_expires_at"].is_i64());
+            if scenario == "missing" {
+                assert!(value["confirmation_expires_at"].is_null());
+            } else {
+                assert!(
+                    value["confirmation_expires_at"].as_i64().unwrap()
+                        <= value["reply_expires_at"].as_i64().unwrap()
+                );
+            }
+        }
+        let after: Vec<(String, String)> =
+            sqlx::query_as("SELECT status,payload FROM send_operations")
+                .fetch_all(&f.service.db.pool)
+                .await
+                .unwrap();
+        let credentials_after: Vec<(String, i64)> =
+            sqlx::query_as("SELECT hash,expires_at FROM oauth_requests ORDER BY hash")
+                .fetch_all(&f.service.db.pool)
+                .await
+                .unwrap();
+        assert_eq!(before, after, "{scenario}: query changed draft");
+        assert_eq!(
+            credentials_before, credentials_after,
+            "{scenario}: query changed credentials"
+        );
+        assert_eq!(f.fake.sends.load(Ordering::SeqCst), 0);
+    }
+}
