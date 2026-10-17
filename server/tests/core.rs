@@ -1363,6 +1363,54 @@ async fn mcp_events_catalog_and_discovery() {
 }
 
 #[tokio::test]
+async fn webhook_proxy_uses_connect_and_does_not_fall_back() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let f = Fixture::new(false);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let config: Config = serde_json::from_value(json!({
+        "database_path": f.config.database_path,
+        "read_token": f.config.read_token,
+        "write_token": f.config.write_token,
+        "webhook_proxy": {"url": format!("http://{address}"), "allowed_hosts": ["assistant.example"]}
+    })).expect("explicit webhook proxy must be accepted");
+    let proxy = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        while !request.ends_with(b"\r\n\r\n") {
+            request.push(stream.read_u8().await.unwrap());
+            assert!(request.len() < 8192);
+        }
+        stream
+            .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+        String::from_utf8(request).unwrap()
+    });
+    let service = Service::new(config, f.fake.clone()).await.unwrap();
+    let app = api::router(service.clone()).unwrap();
+    let (_, body) = http(app, "POST", "/mcp", Some(&"r".repeat(32)), None,
+        json!({"jsonrpc":"2.0","id":1,"method":"events/subscribe","params":{
+            "_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}},
+            "name":"mail.received","arguments":{},
+            "delivery":{"mode":"webhook","url":"https://assistant.example/test-only",
+                "secret":"whsec_YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}}})).await;
+    assert_eq!(body["error"]["code"], -32015, "{body}");
+    assert_eq!(body["error"]["data"]["reason"], "unavailable", "{body}");
+    let request = tokio::time::timeout(std::time::Duration::from_secs(1), proxy)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(request.starts_with("CONNECT assistant.example:443 HTTP/1.1\r\n"));
+    assert!(!request.contains("whsec_") && !request.contains("verification"));
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM event_subscriptions")
+        .fetch_one(&service.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
 async fn mcp_events_rejects_private_callback_and_unknown_filters() {
     let f = Fixture::new(false);
     let app = api::router(f.service().await).unwrap();

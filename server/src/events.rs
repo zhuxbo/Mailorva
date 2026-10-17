@@ -33,10 +33,15 @@ struct SubscriptionState {
 }
 impl Default for Events {
     fn default() -> Self {
+        Self::new(None)
+    }
+}
+impl Events {
+    pub(crate) fn new(proxy: Option<crate::config::WebhookProxy>) -> Self {
         Self {
             wake: Notify::new(),
             gate: Mutex::new(HashMap::new()),
-            webhook: Arc::new(HttpsWebhook),
+            webhook: Arc::new(HttpsWebhook { proxy }),
         }
     }
 }

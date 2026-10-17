@@ -100,6 +100,8 @@ server/target/release/mailorva-server server/config.json
 
 服务在同一个鉴权 MCP 入口支持 `events/list`、`events/subscribe`、`events/unsubscribe`，并在 MCP 2.0（`2026-07-28`）的 `server/discover` 中声明 `events` 能力。实现的是 [MCP Events 草案的 Webhook 接入方式](https://developers.openai.com/plugins/build/mcp-events)，可用于 dots / ChatGPT Work，也可供实现同一事件协议的其他助手使用；仅支持普通 MCP 工具调用的客户端不会自动收到事件。
 
+回调默认直连；如需代理，可配置 `webhook_proxy.url` 和 `webhook_proxy.allowed_hosts`，仅让明确批准的回调域名通过代理访问，适用于不同 AI 助手。配置与信任边界见 [部署说明](ONBOARDING.md#新邮件事件与-dots)。
+
 `mail.received` 支持可选的 `account_id`、`folder` 过滤条件；省略时覆盖所有已配置账号和文件夹。新邮件首次入库时，在同一 SQLite 事务中记录待投递事件，提交后立即唤醒独立投递任务，不等待下一轮邮箱同步，也不让回调阻塞同步。邮箱同步周期保持原配置，默认 60 秒；不同订阅并行投递，同一订阅串行，单次请求最多等待 10 秒；慢回调不占用订阅管理锁；实际 dots 启动时间还取决于接收端调度。
 
 事件只包含 Mailorva `message_id`、账号 ID、文件夹、发件人、主题和收信时间；发件人和主题最多各 512 个字符，正文与附件通过现有工具按需读取。只通知订阅建立后收到且首次入库的邮件；收信时间按 IMAP INTERNALDATE 判断，已有邮件更新和历史导入不回放。`cursor` 固定为 `null`，不支持协议历史重放。

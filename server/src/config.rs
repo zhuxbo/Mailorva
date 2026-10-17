@@ -58,6 +58,57 @@ fn default_interval() -> u64 {
 }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct WebhookProxy {
+    pub url: String,
+    pub allowed_hosts: Vec<String>,
+}
+impl WebhookProxy {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        let url =
+            url::Url::parse(&self.url).map_err(|_| anyhow::anyhow!("Webhook 代理地址无效"))?;
+        anyhow::ensure!(
+            matches!(url.scheme(), "http" | "https")
+                && url.host().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.path() == "/"
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "Webhook 代理须为不含凭据、路径或参数的 HTTP(S) 地址"
+        );
+        anyhow::ensure!(!self.allowed_hosts.is_empty(), "必须指定允许代理的回调主机");
+        for host in &self.allowed_hosts {
+            let parsed = url::Url::parse(&format!("https://{host}/"))
+                .map_err(|_| anyhow::anyhow!("Webhook 代理回调主机无效"))?;
+            anyhow::ensure!(
+                matches!(parsed.host(), Some(url::Host::Domain(_)))
+                    && parsed.host_str() == Some(host.as_str())
+                    && host.contains('.')
+                    && !host.contains('*')
+                    && !host.ends_with('.')
+                    && !host.ends_with(".localhost")
+                    && parsed.username().is_empty()
+                    && parsed.password().is_none()
+                    && parsed.port().is_none()
+                    && parsed.path() == "/"
+                    && parsed.query().is_none()
+                    && parsed.fragment().is_none(),
+                "Webhook 代理回调主机须为完整的小写域名，不含通配符、端口或路径"
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn applies_to(&self, url: &url::Url) -> bool {
+        url.scheme() == "https"
+            && url.port_or_known_default() == Some(443)
+            && url
+                .host_str()
+                .is_some_and(|host| self.allowed_hosts.iter().any(|h| h == host))
+    }
+}
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default = "default_bind")]
     pub bind: SocketAddr,
@@ -66,6 +117,8 @@ pub struct Config {
     pub write_token: SecretRef,
     #[serde(default)]
     pub oauth: Option<crate::oauth::OAuthConfig>,
+    #[serde(default)]
+    pub webhook_proxy: Option<WebhookProxy>,
     #[serde(default)]
     pub allowed_origins: Vec<String>,
     #[serde(default = "default_hosts")]
@@ -91,6 +144,9 @@ impl Config {
         );
         anyhow::ensure!(self.accounts.len() <= 10, "账户数量必须为 0 到 10");
         anyhow::ensure!(self.sync_interval_seconds >= 10, "同步间隔不能小于 10 秒");
+        if let Some(proxy) = &self.webhook_proxy {
+            proxy.validate()?;
+        }
         let mut ids = HashSet::new();
         let mut emails = HashSet::new();
         for account in &self.accounts {
@@ -151,5 +207,69 @@ impl Config {
             smtp_port: a.smtp_port,
             password: a.password.resolve()?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn webhook_proxy_only_matches_explicit_https_hosts() {
+        let proxy = WebhookProxy {
+            url: "http://127.0.0.1:7897".into(),
+            allowed_hosts: vec![
+                "assistant.example".into(),
+                "another-assistant.example".into(),
+            ],
+        };
+        proxy.validate().unwrap();
+        for url in [
+            "https://assistant.example/hook",
+            "https://another-assistant.example:443/hook",
+        ] {
+            assert!(proxy.applies_to(&url::Url::parse(url).unwrap()));
+        }
+        for url in [
+            "http://assistant.example/hook",
+            "https://assistant.example:8443/hook",
+            "https://assistant.example.attacker.example/hook",
+            "https://other.example/hook",
+            "https://127.0.0.1/hook",
+            "https://assistant.example./hook",
+        ] {
+            assert!(!proxy.applies_to(&url::Url::parse(url).unwrap()), "{url}");
+        }
+        for host in [
+            "*",
+            "*.example",
+            "127.0.0.1",
+            "localhost",
+            "a.localhost",
+            "assistant.example:443",
+            "assistant.example/path",
+            "user@assistant.example",
+            "UPPER.example",
+        ] {
+            let mut invalid = proxy.clone();
+            invalid.allowed_hosts = vec![host.into()];
+            assert!(invalid.validate().is_err(), "{host}");
+        }
+        for address in [
+            "socks5://127.0.0.1:7897",
+            "http://user:secret@127.0.0.1:7897",
+            "http://127.0.0.1:7897/path",
+            "http://127.0.0.1:7897/?secret=value",
+        ] {
+            let mut invalid = proxy.clone();
+            invalid.url = address.into();
+            assert!(
+                invalid.validate().is_err(),
+                "invalid proxy must fail validation"
+            );
+        }
+        let mut invalid = proxy;
+        invalid.allowed_hosts.clear();
+        assert!(invalid.validate().is_err());
     }
 }

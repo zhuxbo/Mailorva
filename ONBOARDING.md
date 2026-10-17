@@ -149,6 +149,17 @@ location = /.well-known/oauth-authorization-server/mail-mcp {
 
 升级服务程序并重启即可启用 Events，无需新增同步配置；保留原 `sync_interval_seconds`。首次启动自动在原 SQLite 中增加事件订阅和待投递表。数据库现包含 Webhook 签名密钥，继续按邮箱凭据保护数据库、WAL、SHM 和备份。服务端需要出站 DNS 和 HTTPS 到接收方提供的公网回调地址；不使用系统 HTTP 代理，不需要额外入站端口。
 
+若回调需要代理，可在服务配置中添加 `webhook_proxy`（默认 `null`，直连）：
+
+```json
+"webhook_proxy": {
+  "url": "http://192.168.3.94:7897",
+  "allowed_hosts": ["connectors.api.openai.com"]
+}
+```
+
+`url` 支持不含凭据的 HTTP(S) 代理地址。`allowed_hosts` 是由管理员明确批准的回调域名列表，精确匹配完整小写域名，不支持通配符；其他 AI 助手可添加其实际回调域名，无需修改代码。仅这些域名的 HTTPS 443 回调通过代理建立 CONNECT 隧道，域名解析交由可信代理完成，TLS 证书与主机名仍由服务端校验，禁止重定向，失败不回退直连。代理必须能正确解析这些域名，并阻止访问私网等非公网目标；不要添加不受信任的域名。其他回调保留本机 DNS、公网地址校验及固定解析地址连接。邮箱 IMAP/SMTP 和 OAuth 请求不使用此代理。修改配置后重启服务。
+
 1. 在插件配置中重新扫描 Mailorva 的 MCP 工具与事件，确认出现 `mail.received`。
 2. 告诉 dots：“监控 Mailorva 新邮件，收到后判断是否需要处理，需要回复时准备草稿并通知我。”也可限定账号 ID 和文件夹。
 3. dots 调用 `events/subscribe` 并提供回调 URL 与 `whsec_` 签名密钥；服务完成签名挑战验证后才保存订阅。只读固定令牌及 OAuth `mail:read` 均可订阅，订阅不增加邮箱写入权限。

@@ -4,6 +4,7 @@
   "read_token": { "file": "/etc/mailorva/read-token" },
   "write_token": { "file": "/etc/mailorva/write-token" },
   "oauth": null,
+  "webhook_proxy": null,
   "allowed_origins": [],
   "allowed_hosts": ["mail.example.com", "127.0.0.1", "localhost"],
   "sync_interval_seconds": 60,

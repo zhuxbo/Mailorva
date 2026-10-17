@@ -101,7 +101,10 @@ pub(super) struct Reply {
 pub(super) trait Webhook: Send + Sync {
     async fn send(&self, delivery: Delivery<'_>) -> Result<Reply, CallbackError>;
 }
-pub(super) struct HttpsWebhook;
+#[derive(Default)]
+pub(super) struct HttpsWebhook {
+    pub proxy: Option<crate::config::WebhookProxy>,
+}
 #[async_trait::async_trait]
 impl Webhook for HttpsWebhook {
     async fn send(&self, d: Delivery<'_>) -> Result<Reply, CallbackError> {
@@ -111,22 +114,28 @@ impl Webhook for HttpsWebhook {
                 .host_str()
                 .ok_or(CallbackError::InvalidUrl)?
                 .trim_matches(['[', ']']);
-            // Resolve on every attempt and pin the validated addresses; disable proxies and redirects.
-            let addresses: Vec<SocketAddr> =
-                tokio::net::lookup_host((host, url.port_or_known_default().unwrap_or(443)))
-                    .await
-                    .map_err(|_| CallbackError::Unavailable)?
-                    .collect();
-            if addresses.is_empty() || addresses.iter().any(|a| !public_ip(a.ip())) {
-                return Err(CallbackError::InvalidUrl);
-            }
-            let client = reqwest::Client::builder()
+            let mut builder = reqwest::Client::builder()
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(10))
-                .resolve_to_addrs(host, &addresses)
-                .build()
-                .map_err(|_| CallbackError::Unavailable)?;
+                .timeout(Duration::from_secs(10));
+            if let Some(proxy) = self.proxy.as_ref().filter(|p| p.applies_to(&url)) {
+                // Only administrator-approved hosts delegate DNS to the trusted proxy.
+                // CONNECT retains end-to-end TLS hostname verification; never fall back to direct.
+                builder = builder.proxy(
+                    reqwest::Proxy::https(&proxy.url).map_err(|_| CallbackError::Unavailable)?,
+                );
+            } else {
+                let addresses: Vec<SocketAddr> =
+                    tokio::net::lookup_host((host, url.port_or_known_default().unwrap_or(443)))
+                        .await
+                        .map_err(|_| CallbackError::Unavailable)?
+                        .collect();
+                if addresses.is_empty() || addresses.iter().any(|a| !public_ip(a.ip())) {
+                    return Err(CallbackError::InvalidUrl);
+                }
+                builder = builder.resolve_to_addrs(host, &addresses);
+            }
+            let client = builder.build().map_err(|_| CallbackError::Unavailable)?;
             send_request(&client, d).await
         })
         .await
@@ -343,7 +352,7 @@ mod tests {
             gone.status, 410,
             "terminal status must survive an oversized response body"
         );
-        assert!(HttpsWebhook
+        assert!(HttpsWebhook::default()
             .send(Delivery {
                 url: &url,
                 subscription: "sub_test",

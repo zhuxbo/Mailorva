@@ -34,12 +34,13 @@ impl Service {
             Some(config) => Some(oauth::OAuth::new(config.clone(), db.pool.clone()).await?),
             None => None,
         };
+        let events = Arc::new(events::Events::new(config.webhook_proxy.clone()));
         Ok(Arc::new(Self {
             config,
             db,
             transport,
             oauth,
-            events: Arc::new(events::Events::default()),
+            events,
             account_locks: Mutex::new(HashMap::new()),
             account_changes: Mutex::new(()),
         }))
