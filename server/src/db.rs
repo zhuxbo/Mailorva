@@ -125,6 +125,26 @@ impl Database {
         Ok(())
     }
     pub async fn cleanup(&self, now: i64) -> Result<u64> {
+        // OAuth tables are optional and may not exist on first startup.
+        let tables: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('oauth_replies','oauth_requests')",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        if tables.iter().any(|name| name == "oauth_replies") {
+            sqlx::query("UPDATE send_operations SET payload='',status='expired' WHERE status='prepared' AND id IN (SELECT id FROM oauth_replies WHERE expires_at<=?)")
+                .bind(now).execute(&self.pool).await?;
+            if tables.iter().any(|name| name == "oauth_requests") {
+                sqlx::query("DELETE FROM oauth_requests WHERE kind IN ('reply_chat_confirmation','reply_approval') AND json_extract(data,'$.id') IN (SELECT id FROM oauth_replies WHERE expires_at<=?)")
+                    .bind(now).execute(&self.pool).await?;
+            }
+        }
+        if tables.iter().any(|name| name == "oauth_requests") {
+            sqlx::query("DELETE FROM oauth_requests WHERE expires_at<=?")
+                .bind(now)
+                .execute(&self.pool)
+                .await?;
+        }
         sqlx::query("DELETE FROM event_seen WHERE received_at<?")
             .bind(now - model::RETENTION_SECONDS)
             .execute(&self.pool)

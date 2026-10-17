@@ -1556,3 +1556,195 @@ async fn revoked_oauth_grant_removes_queued_event_subscription() {
         .unwrap();
     assert_eq!(count, 0);
 }
+
+#[tokio::test]
+async fn sync_cleanup_removes_expired_reply_content_but_keeps_deduplication() {
+    let f = Fixture::new().await;
+    let token = f.reply_token().await;
+    let access = token["access_token"].as_str().unwrap();
+    let mut ids = Vec::new();
+    for name in [
+        "token-only",
+        "reply",
+        "live",
+        "sending",
+        "sent",
+        "unknown",
+        "failed",
+    ] {
+        let preview = f.prepare_reply(access, name).await;
+        ids.push(
+            preview["confirmation_url"]
+                .as_str()
+                .unwrap()
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    let cutoff = now();
+    sqlx::query("UPDATE oauth_requests SET expires_at=? WHERE kind='reply_chat_confirmation' AND json_extract(data,'$.id')=?")
+        .bind(cutoff).bind(&ids[0]).execute(&f.service.db.pool).await.unwrap();
+    for (i, state) in [
+        (1, "prepared"),
+        (3, "sending"),
+        (4, "sent"),
+        (5, "unknown"),
+        (6, "failed"),
+    ] {
+        sqlx::query("UPDATE oauth_replies SET expires_at=? WHERE id=?")
+            .bind(cutoff)
+            .bind(&ids[i])
+            .execute(&f.service.db.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE send_operations SET status=? WHERE id=?")
+            .bind(state)
+            .bind(&ids[i])
+            .execute(&f.service.db.pool)
+            .await
+            .unwrap();
+    }
+    // A legacy confirmation may outlive its parent reply, just like a renewed chat token.
+    sqlx::query("INSERT INTO oauth_requests(hash,kind,data,expires_at) VALUES('legacy','reply_approval',?,?)")
+        .bind(json!({"id":ids[1]}).to_string()).bind(cutoff+600).execute(&f.service.db.pool).await.unwrap();
+    sqlx::query("INSERT INTO send_operations SELECT 'personal',payload,payload_hash,message_id,status,created_at FROM send_operations WHERE id=?")
+        .bind(&ids[2]).execute(&f.service.db.pool).await.unwrap();
+    let before: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT id,payload_hash,message_id FROM send_operations ORDER BY id")
+            .fetch_all(&f.service.db.pool)
+            .await
+            .unwrap();
+    for _ in 0..2 {
+        f.service.db.cleanup(cutoff).await.unwrap();
+        // The single-connection pool makes query_only cover the entire MCP query path.
+        sqlx::query("PRAGMA query_only=ON")
+            .execute(&f.service.db.pool)
+            .await
+            .unwrap();
+        let (changes_before,): (i64,) = sqlx::query_as("SELECT total_changes()")
+            .fetch_one(&f.service.db.pool)
+            .await
+            .unwrap();
+        for (i, operation, expected_status, expected_confirmation) in [
+            (0, "token-only", "prepared", "unavailable"),
+            (1, "reply", "expired", "not_required"),
+        ] {
+            let (deadline,): (i64,) =
+                sqlx::query_as("SELECT expires_at FROM oauth_replies WHERE id=?")
+                    .bind(&ids[i])
+                    .fetch_one(&f.service.db.pool)
+                    .await
+                    .unwrap();
+            let (_, response) = f
+                .mcp(
+                    access,
+                    "tools/call",
+                    json!({
+                        "name":"get_reply_status", "arguments":{"operation_id":operation}
+                    }),
+                )
+                .await;
+            assert_ne!(response["result"]["isError"], true, "{response}");
+            let status: Value =
+                serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            assert_eq!(status["operation_id"], operation);
+            assert_eq!(status["status"], expected_status);
+            assert_eq!(status["send_status"], expected_status);
+            assert_eq!(status["confirmation_status"], expected_confirmation);
+            assert!(status["confirmation_expires_at"].is_null());
+            assert_eq!(status["reply_expires_at"], deadline);
+            assert_eq!(
+                status["message_id"],
+                before.iter().find(|row| row.0 == ids[i]).unwrap().2
+            );
+            if i == 0 {
+                assert!(deadline > now());
+            } else {
+                assert!(deadline <= now());
+            }
+        }
+        let (changes_after,): (i64,) = sqlx::query_as("SELECT total_changes()")
+            .fetch_one(&f.service.db.pool)
+            .await
+            .unwrap();
+        assert_eq!(changes_before, changes_after);
+        sqlx::query("PRAGMA query_only=OFF")
+            .execute(&f.service.db.pool)
+            .await
+            .unwrap();
+        for (i, expected) in [
+            (0, "prepared"),
+            (1, "expired"),
+            (2, "prepared"),
+            (3, "sending"),
+            (4, "sent"),
+            (5, "unknown"),
+            (6, "failed"),
+        ] {
+            let (status, payload): (String, String) =
+                sqlx::query_as("SELECT status,payload FROM send_operations WHERE id=?")
+                    .bind(&ids[i])
+                    .fetch_one(&f.service.db.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(status, expected);
+            assert_eq!(payload.is_empty(), i == 1);
+        }
+        let (personal_status, personal_payload): (String, String) =
+            sqlx::query_as("SELECT status,payload FROM send_operations WHERE id='personal'")
+                .fetch_one(&f.service.db.pool)
+                .await
+                .unwrap();
+        assert_eq!(personal_status, "prepared");
+        assert!(!personal_payload.is_empty());
+        let remaining: Vec<String> = sqlx::query_scalar("SELECT json_extract(data,'$.id') FROM oauth_requests WHERE kind IN ('reply_chat_confirmation','reply_approval')")
+            .fetch_all(&f.service.db.pool).await.unwrap();
+        assert_eq!(remaining, vec![ids[2].clone()]);
+        let after: Vec<(String, String, String)> =
+            sqlx::query_as("SELECT id,payload_hash,message_id FROM send_operations ORDER BY id")
+                .fetch_all(&f.service.db.pool)
+                .await
+                .unwrap();
+        assert_eq!(before, after);
+        let (count,): (i64,) = sqlx::query_as("SELECT count(*) FROM oauth_replies")
+            .fetch_one(&f.service.db.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 7);
+    }
+    // Content binding survives credential cleanup and reply cleanup alike.
+    for operation in ["token-only", "reply"] {
+        let (_, response) = f
+            .mcp(
+                access,
+                "tools/call",
+                json!({
+                    "name":"prepare_reply", "arguments":{
+                        "id":"a:494e424f58:1:1", "operation_id":operation,
+                        "body_text":"更改后的回复", "from_address":"alias@example.com"
+                    }
+                }),
+            )
+            .await;
+        assert_eq!(response["result"]["isError"], true, "{response}");
+        let error: Value =
+            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(error["error"]["code"], "invalid_request");
+        assert_eq!(error["error"]["message"], "同一操作编号不能用于不同内容");
+    }
+    // Replaying the expired operation cannot recreate its body or obtain a new credential.
+    let replay = f.prepare_reply(access, "reply").await;
+    assert_eq!(replay["status"], "expired");
+    assert!(replay.get("confirmation_token").is_none());
+    let (payload,): (String,) = sqlx::query_as("SELECT payload FROM send_operations WHERE id=?")
+        .bind(&ids[1])
+        .fetch_one(&f.service.db.pool)
+        .await
+        .unwrap();
+    assert!(payload.is_empty());
+    assert_eq!(f.fake.sends.load(Ordering::SeqCst), 0);
+}
