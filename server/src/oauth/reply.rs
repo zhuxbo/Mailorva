@@ -44,6 +44,10 @@ impl OAuth {
         let operation = input.operation_id.clone();
         let id = self.reply_id(grant, &operation)?;
         input.operation_id = id.clone();
+        let include_original = input.include_original;
+        input.include_original = false;
+        let parent = service.db.message(message).await?;
+        let quoted_body = crate::operations::quoted_reply(&input.body_text, &parent);
         let preview = service.prepare_reply(message, input).await?;
         // A grant-specific identifier cannot adopt another grant's or a legacy prepared send.
         sqlx::query("INSERT INTO oauth_replies(id,family,expires_at) VALUES(?,?,?) ON CONFLICT(id) DO NOTHING")
@@ -53,8 +57,64 @@ impl OAuth {
         value["requires_user_confirmation"] = json!(true);
         if value["status"] == "prepared" {
             self.reply_live(&id).await?;
-            value["confirmation_url"] = json!(format!("{}/oauth/replies/{id}", self.issuer));
+            let (payload_hash,): (String,) =
+                sqlx::query_as("SELECT payload_hash FROM send_operations WHERE id=?")
+                    .bind(&id)
+                    .fetch_one(&service.db.pool)
+                    .await?;
+            let confirmation = random();
+            self.store
+                .save(
+                    &confirmation,
+                    "reply_chat_confirmation",
+                    &ChatApproval {
+                        id,
+                        family: grant.family.clone(),
+                        binding: self.binding.clone(),
+                        payload_hash,
+                        quoted_body,
+                    },
+                    600,
+                )
+                .await
+                .map_err(|_| AppError::Internal)?;
+            value["confirmation_token"] = json!(confirmation);
+            value["confirmation_expires_at"] = json!(now() + 600);
+            value["include_original"] = json!(include_original);
         }
+        Ok(value)
+    }
+    pub(crate) async fn confirm_reply(
+        &self,
+        service: &Service,
+        grant: &Grant,
+        operation: &str,
+        confirmation: &str,
+        include_original: bool,
+    ) -> Result<Value> {
+        let id = self.reply_id(grant, operation)?;
+        self.reply_live(&id).await?;
+        let approval: ChatApproval = self
+            .store
+            .take(confirmation, "reply_chat_confirmation")
+            .await
+            .map_err(|_| AppError::Forbidden)?;
+        if approval.id != id || approval.family != grant.family || approval.binding != self.binding
+        {
+            return Err(AppError::Forbidden);
+        }
+        let (hash,): (String,) =
+            sqlx::query_as("SELECT payload_hash FROM send_operations WHERE id=?")
+                .bind(&id)
+                .fetch_one(&service.db.pool)
+                .await?;
+        if hash != approval.payload_hash {
+            return Err(AppError::Conflict);
+        }
+        let quoted_body = include_original.then_some(approval.quoted_body);
+        let mut value =
+            serde_json::to_value(service.send_confirmed_reply(&id, quoted_body).await?)?;
+        value["operation_id"] = json!(operation);
         Ok(value)
     }
     pub(crate) async fn reply_status(
@@ -95,6 +155,15 @@ async fn expire(service: &Service, id: &str, expiry: i64) -> Result<()> {
     }
     Ok(())
 }
+#[derive(Serialize, Deserialize)]
+struct ChatApproval {
+    id: String,
+    family: String,
+    binding: String,
+    payload_hash: String,
+    quoted_body: String,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Approval {
     id: String,
@@ -217,6 +286,6 @@ async fn confirm(
     if hash != pending.payload_hash {
         return Err(AppError::Conflict);
     }
-    let status = s.send_confirmed_reply(&id).await?;
+    let status = s.send_confirmed_reply(&id, None).await?;
     Ok(result_page(&status.status).into_response())
 }

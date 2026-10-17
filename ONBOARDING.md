@@ -106,7 +106,7 @@ sudo chmod 0640 /etc/mailorva/oauth-approval-secret
 
 `allowed_redirect_origins` 只填写可信助手实际回调的 HTTPS 来源（协议、主机、可选端口），不使用通配符。动态注册只能提交这些来源的回调；注册后按完整回调 URL 精确匹配。客户端标识由服务签名，无匿名注册表；服务不会抓取客户端传入的 URL。其他助手需要将其可信回调来源加入配置后重启；不支持 HTTP loopback 回调。
 
-公开路由为 `/.well-known/oauth-protected-resource`、`/.well-known/oauth-authorization-server`、`/oauth/register`、`/oauth/authorize`、`/oauth/token`、`/oauth/revoke`、`/oauth/replies/{id}`。它们不使用固定 Bearer 认证，连接授权仍必须通过独立口令和用户确认，回复发送由用户在独立确认页点击按钮确认；MCP 邮件请求始终需要有效令牌。服务监听地址继续保持 loopback。
+公开路由为 `/.well-known/oauth-protected-resource`、`/.well-known/oauth-authorization-server`、`/oauth/register`、`/oauth/authorize`、`/oauth/token`、`/oauth/revoke`、`/oauth/replies/{id}`。它们不使用固定 Bearer 认证，连接授权仍必须通过独立口令和用户确认，回复发送由用户在助手对话中核对草稿后明确确认；MCP 邮件请求始终需要有效令牌。服务监听地址继续保持 loopback。
 
 若公网入口采用子路径（例如 `/mail-mcp/`），应让反代剥除此前缀，再将入口 `/` 重写为后端 `/mcp`，同时转发该前缀下的 OAuth 和 metadata 路由。此时 `issuer` 为 `https://mail.example.com/mail-mcp`，`resource` 为 `https://mail.example.com/mail-mcp/`。RFC 8414 发现请求从域名根发出，还需在公网 Nginx 增加精确路由（替换上游与 Host）：
 
@@ -125,19 +125,21 @@ location = /.well-known/oauth-authorization-server/mail-mcp {
 
 权限默认 `mail:read`；选择 `mail:read mail:reply` 可增加回复已有邮件的能力。旧授权和刷新令牌不会自动获得回复权限，必须重新授权；刷新只能保持或缩小权限。OAuth 令牌仍不能调用 REST API，也不开放通用发送、移动、标记及邮箱管理工具。
 
-已有 ChatGPT 插件重新连接时可能沿用原来的 `mail:read` 请求，需核对实际授权页明确显示“读取和回复邮件”。授权后刷新插件工具；若 dot 仍只看到旧工具，可通过 dot 菜单重启以重新加载，对话、记忆和已安排任务会保留，但正在进行的工作可能中断。验收时应实际调用 `prepare_reply` 与 `get_reply_status`，只生成测试草稿，不确认发送。
+已有 ChatGPT 插件重新连接时可能沿用原来的 `mail:read` 请求，需核对实际授权页明确显示“读取和回复邮件”。授权后刷新插件工具；若 dot 仍只看到旧工具，可通过 dot 菜单重启以重新加载，对话、记忆和已安排任务会保留，但正在进行的工作可能中断。刷新后应看到 `prepare_reply`、`confirm_reply` 与 `get_reply_status`。生产验收只准备草稿及查询状态，不通过真实邮箱测试发送。旧插件缓存的“打开确认页”说明应同步刷新。
 
-回复授权仅增加 `prepare_reply` 和 `get_reply_status`：
+回复授权增加 `prepare_reply`、`confirm_reply` 和 `get_reply_status`：
 
-- `prepare_reply` 提交原邮件 `id`、唯一 `operation_id`、`body_text` 及可选 `from_address`、`include_original`。`body_text` 默认只填写新增回复，服务端自动附加原邮件的发件人、收件人、时间、主题和纯文本正文；已由客户端引用或明确不引用时传 `include_original=false`，避免重复引用。服务端固定原账号、Reply-To（无则 From）收件人和回复主题，发件人只能是账号主地址或已配置别名；不能添加抄送或任意收件人。
-- 升级默认引用功能时需同步更新服务端与 macOS App：旧 macOS 已自行引用但不会传 `include_original=false`，连接新服务会重复引用；新 App 的该参数需要新版服务端支持。Android 继续提交新增正文，由服务端引用。
-- 返回完整预览和 `confirmation_url`。助手应把链接交给用户本人；用户在独立页面核对完整内容，无需再次输入授权口令，点击“确认发送这封回复”。此点击立即发送，助手不得代为确认。确认链接应仅由用户本人打开，不要转发。MCP 没有可绕过页面的 OAuth 发送工具。
-- 回复自准备起 30 分钟有效，页面确认凭证 10 分钟有效且一次使用。修改正文需新操作编号并重新确认；相同编号不能换内容。不同 OAuth 授权的操作互相隔离，授权撤销或过期后不能确认发送。
+- `prepare_reply` 提交原邮件 `id`、唯一 `operation_id`、实际发送的 `body_text`，可选 `from_address` 和默认开启的 `include_original`。正文只包含新增回复，不拼接原邮件或中文对照。英文来信由助手展示英文草稿及中文对照，实际仅发英文；中文来信只生成并发送中文。服务端固定原账号、Reply-To（无则 From）收件人和回复主题，发件人只能是账号主地址或已配置别名；不能添加抄送或任意收件人。
+- 升级默认引用功能时需同步更新服务端与 macOS App：旧 macOS 已自行引用但不会传 `include_original=false`，连接新服务会重复引用；新 App 的该参数需要新版服务端支持。Android 编辑区提供默认勾选的“包含原邮件”，通过 HTTP `include_original` 参数传递选择，由服务端生成完整预览；macOS 继续自行组合正文并显式传 `false`，防止重复引用。
+- 返回新增回复预览、`include_original`、有效期 10 分钟的一次性 `confirmation_token`，不再返回网页链接。助手展示发件人、收件人、主题、实际发送正文与包含选项，然后结束本轮等待用户明确回复“确认”或“发送”，或由客户端对本次写操作进行确认。凭证只用于工具调用，不应展示给用户。
+- `confirm_reply` 只接收 `operation_id`、`confirmation_token` 和明确的 `include_original` 布尔值；不能改正文或收件人。包含原邮件时附加准备时保存的快照，取消则只发送新增正文。凭证与授权、操作、正文哈希绑定且只消费一次；发送前在账户锁内再次检查授权，复用原有防重机制。
+- 是否收到用户本人本次确认由助手及客户端权限机制负责，服务端凭证保证内容绑定、时效和防重，不将凭证本身当作用户点击的证明。旧 `/oauth/replies/{id}` 路由仅兼容既有确认链接，新流程不再引导打开网页。
+- 回复自准备起 30 分钟有效，确认凭证 10 分钟有效且一次使用。修改正文需新操作编号并重新确认；相同编号不能换内容。不同 OAuth 授权的操作互相隔离，授权撤销或过期后不能确认发送。
 - `get_reply_status` 用原 `operation_id` 查询状态；`unknown` 必须人工检查发件箱，不得自动重发。`list_accounts` 返回 `can_reply` 表示 OAuth 回复能力，`can_write` 仍为 false。
 
 访问令牌有效期为 1 小时；允许刷新时，授权最长持续 30 天，每次刷新都更换访问和刷新令牌。刷新令牌重放会撤销同一授权的全部令牌；客户端不得并发或自动重放未知结果的刷新请求。`POST /oauth/revoke` 支持客户端撤销自己的访问或刷新令牌，服务端仅保存令牌哈希。进程重启保留未到期授权；修改授权口令、issuer、resource 或回调来源配置会使原注册和授权失效，助手需要重新创建连接。禁用 OAuth 只停用入口；永久撤销所有旧授权应轮换授权口令并重启。
 
-授权页防止跨站提交和嵌入，回调必须与注册值一致，授权码最多 5 分钟且一次有效。匿名注册、授权和换令牌均有全局速率限制，超限返回 `429` 和 `Retry-After`。测试覆盖 PKCE/回调/resource 篡改、CSRF、并发兑换、过期/重放/撤销以及 MCP 分级权限、独立确认页发送和 REST 隔离；自动测试使用空邮箱或模拟数据。
+授权页防止跨站提交和嵌入，回调必须与注册值一致，授权码最多 5 分钟且一次有效。匿名注册、授权和换令牌均有全局速率限制，超限返回 `429` 和 `Retry-After`。测试覆盖 PKCE/回调/resource 篡改、CSRF、并发兑换、过期/重放/撤销以及 MCP 分级权限、对话确认发送、旧确认链接兼容和 REST 隔离；自动测试使用空邮箱或模拟数据。
 
 公网验收需分别确认：未认证 MCP 返回带 metadata 地址的 `401`；标准发现 URL 返回正确 issuer；实际助手完成注册、浏览器授权及只读搜索。仅用脚本搜索成功不能代表 dot 接入完成。
 

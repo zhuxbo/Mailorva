@@ -946,6 +946,22 @@ async fn oauth_reply_scope_is_explicit_and_refresh_cannot_escalate() {
 }
 
 impl Fixture {
+    async fn confirm_chat(&self, access: &str, preview: &Value, include_original: bool) -> Value {
+        let (_, result) = self
+            .mcp(
+                access,
+                "tools/call",
+                json!({
+                    "name":"confirm_reply", "arguments": {
+                        "operation_id":preview["operation_id"],
+                        "confirmation_token":preview["confirmation_token"],
+                        "include_original":include_original
+                    }
+                }),
+            )
+            .await;
+        result
+    }
     async fn reply_token(&self) -> Value {
         let client = self.register().await;
         let code = self.code_scope(&client, "mail:read mail:reply").await;
@@ -961,7 +977,25 @@ impl Fixture {
             "id":"a:494e424f58:1:1","operation_id":operation,"body_text":"回复 <script>alert(1)</script>","from_address":"alias@example.com"
         }})).await;
         assert_ne!(result["result"]["isError"], true, "{result}");
-        serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+        let mut preview: Value =
+            serde_json::from_str(result["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(preview.get("confirmation_url").is_none());
+        // Exercise legacy confirmation links without advertising them to new clients.
+        let (family,): (String,) =
+            sqlx::query_as("SELECT family FROM oauth_tokens WHERE access_hash=?")
+                .bind(hex::encode(Sha256::digest(access)))
+                .fetch_one(&self.service.db.pool)
+                .await
+                .unwrap();
+        let id = format!(
+            "oauth-{}",
+            hex::encode(Sha256::digest(format!("{family}:{operation}")))
+        );
+        preview["confirmation_url"] = json!(format!(
+            "{}/oauth/replies/{id}",
+            RESOURCE.trim_end_matches('/')
+        ));
+        preview
     }
     async fn confirmation(&self, path: &str) -> (String, String, String) {
         let (status, headers, body) = self.request("GET", path, &[], String::new()).await;
@@ -985,28 +1019,135 @@ impl Fixture {
     }
 }
 #[tokio::test]
+async fn chat_reply_keeps_draft_separate_and_sends_selected_quote_once() {
+    for include_original in [true, false] {
+        let f = Fixture::new().await;
+        let token = f.reply_token().await;
+        let access = token["access_token"].as_str().unwrap();
+        let preview = f.prepare_reply(access, "chat-reply").await;
+        assert_eq!(preview["body_text"], "回复 <script>alert(1)</script>");
+        assert_eq!(preview["include_original"], true);
+        assert_eq!(f.fake.sends.load(Ordering::SeqCst), 0);
+        let (_, injected) = f
+            .mcp(
+                access,
+                "tools/call",
+                json!({
+                    "name":"confirm_reply", "arguments": {
+                        "operation_id":preview["operation_id"],
+                        "confirmation_token":preview["confirmation_token"],
+                        "include_original":include_original, "body_text":"unreviewed"
+                    }
+                }),
+            )
+            .await;
+        assert_eq!(injected["result"]["isError"], true);
+        // The original used for sending is pinned at preparation time.
+        f.service
+            .db
+            .put("a", "me@example.com", "INBOX", 1, mail(1, "changed", now()))
+            .await
+            .unwrap();
+        let result = f.confirm_chat(access, &preview, include_original).await;
+        assert_ne!(result["result"]["isError"], true, "{result}");
+        let replay = f.confirm_chat(access, &preview, include_original).await;
+        assert_eq!(replay["result"]["isError"], true);
+        assert_eq!(f.fake.sends.load(Ordering::SeqCst), 1);
+        let outgoing = f.fake.outgoing.lock().unwrap();
+        if include_original {
+            assert!(outgoing[0]
+                .1
+                .body_text
+                .starts_with("回复 <script>alert(1)</script>\n\n> -------- 原邮件 --------"));
+            assert!(outgoing[0].1.body_text.ends_with("> 原邮件"));
+            assert!(!outgoing[0].1.body_text.contains("changed"));
+        } else {
+            assert_eq!(
+                outgoing[0].1.body_text,
+                preview["body_text"].as_str().unwrap()
+            );
+        }
+        assert_eq!(outgoing[0].1.to, ["vendor@example.com"]);
+    }
+}
+
+#[tokio::test]
+async fn chat_reply_rejects_expired_changed_cross_grant_and_revoked_confirmation() {
+    for scenario in [
+        "expired",
+        "changed",
+        "cross_grant",
+        "revoked",
+        "wrong_operation",
+    ] {
+        let f = Fixture::new().await;
+        let token = f.reply_token().await;
+        let access = token["access_token"].as_str().unwrap();
+        let mut preview = f.prepare_reply(access, "chat-guard").await;
+        let mut caller = access.to_owned();
+        match scenario {
+            "expired" => {
+                sqlx::query(
+                    "UPDATE oauth_requests SET expires_at=0 WHERE kind='reply_chat_confirmation'",
+                )
+                .execute(&f.service.db.pool)
+                .await
+                .unwrap();
+            }
+            "changed" => {
+                sqlx::query("UPDATE send_operations SET payload_hash='changed'")
+                    .execute(&f.service.db.pool)
+                    .await
+                    .unwrap();
+            }
+            "cross_grant" => {
+                caller = f.reply_token().await["access_token"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned();
+                f.prepare_reply(&caller, "chat-guard").await;
+            }
+            "revoked" => {
+                sqlx::query("DELETE FROM oauth_tokens")
+                    .execute(&f.service.db.pool)
+                    .await
+                    .unwrap();
+            }
+            "wrong_operation" => preview["operation_id"] = json!("different"),
+            _ => unreachable!(),
+        }
+        let result = f.confirm_chat(&caller, &preview, true).await;
+        assert!(
+            result.get("error").is_some() || result["result"]["isError"] == true,
+            "{scenario}: {result}"
+        );
+        assert_eq!(f.fake.sends.load(Ordering::SeqCst), 0, "{scenario}");
+    }
+}
+
+#[tokio::test]
 async fn oauth_reply_requires_human_confirmation_and_sends_once() {
     let f = Fixture::new().await;
     let token = f.reply_token().await;
     let access = token["access_token"].as_str().unwrap();
     let (_, tools) = f.mcp(access, "tools/list", json!({})).await;
     let tools = tools["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 6);
+    assert_eq!(tools.len(), 7);
+    assert_eq!(
+        tools.iter().find(|t| t["name"] == "confirm_reply").unwrap()["annotations"]["readOnlyHint"],
+        false
+    );
     assert!(!tools.iter().any(|t| t["name"] == "send_prepared"));
     let preview = f.prepare_reply(access, "reply-1").await;
     assert_eq!(preview["to"], json!(["vendor@example.com"]));
     assert_eq!(preview["from_address"], "alias@example.com");
-    assert!(preview["body_text"]
-        .as_str()
-        .unwrap()
-        .contains("\n> 原邮件"));
+    assert_eq!(preview["body_text"], "回复 <script>alert(1)</script>");
     assert_eq!(f.fake.sends.load(Ordering::SeqCst), 0);
     let url = preview["confirmation_url"].as_str().unwrap();
     let path = url.strip_prefix(RESOURCE.trim_end_matches('/')).unwrap();
     let (nonce, cookie, body) = f.confirmation(path).await;
     assert!(!body.contains("name=\"approval_secret\""));
     assert!(body.contains("&lt;script&gt;"));
-    assert!(body.contains("&gt; 原邮件"));
     assert!(!body.contains("<script>"));
     assert!(body.contains("alias@example.com") && body.contains("vendor@example.com"));
     let headers = [

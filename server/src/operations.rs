@@ -33,7 +33,7 @@ pub struct PrepareReply {
 fn default_include_original() -> bool {
     true
 }
-fn quoted_reply(body: &str, original: &crate::model::Message) -> String {
+pub(crate) fn quoted_reply(body: &str, original: &crate::model::Message) -> String {
     let text = format!(
         "-------- 原邮件 --------\n发件人：{}\n收件人：{}\n时间：{}\n主题：{}\n\n{}",
         original.from_address,
@@ -276,12 +276,27 @@ impl Service {
         })
     }
     pub async fn send_prepared(&self, id: &str) -> Result<SendStatus> {
-        self.send_prepared_inner(id, false).await
+        self.send_prepared_inner(id, false, None).await
     }
-    pub(crate) async fn send_confirmed_reply(&self, id: &str) -> Result<SendStatus> {
-        self.send_prepared_inner(id, true).await
+    pub(crate) async fn send_confirmed_reply(
+        &self,
+        id: &str,
+        quoted_body: Option<String>,
+    ) -> Result<SendStatus> {
+        self.send_prepared_inner(id, true, quoted_body).await
     }
-    async fn send_prepared_inner(&self, id: &str, oauth_reply: bool) -> Result<SendStatus> {
+    async fn send_prepared_inner(
+        &self,
+        id: &str,
+        oauth_reply: bool,
+        quoted_body: Option<String>,
+    ) -> Result<SendStatus> {
+        if quoted_body
+            .as_ref()
+            .is_some_and(|body| body.len() > 1024 * 1024)
+        {
+            return Err(AppError::Invalid);
+        }
         let row = sqlx::query("SELECT payload,status,message_id FROM send_operations WHERE id=?")
             .bind(id)
             .fetch_optional(&self.db.pool)
@@ -330,7 +345,7 @@ impl Service {
             to: input.to,
             cc: input.cc,
             subject: input.subject,
-            body_text: input.body_text,
+            body_text: quoted_body.unwrap_or(input.body_text),
             in_reply_to: parent.and_then(|p| p.message_id),
             references,
             message_id: row.get("message_id"),

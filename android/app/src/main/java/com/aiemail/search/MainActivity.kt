@@ -18,6 +18,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.ImeAction
@@ -160,6 +161,7 @@ private fun formatDate(value: String): String = runCatching { OffsetDateTime.par
 
 @Composable private fun ReplyDialog(state: ReplyState, controller: ReplyController, canWrite: Boolean) {
     var body by remember(state.messageId) { mutableStateOf("") }
+    var includeOriginal by remember(state.messageId) { mutableStateOf(true) }
     var confirmClear by remember { mutableStateOf(false) }
     if (confirmClear) {
         AlertDialog(onDismissRequest = { confirmClear = false }, title = { Text("已核对发送情况？") },
@@ -179,6 +181,10 @@ private fun formatDate(value: String): String = runCatching { OffsetDateTime.par
                 }
                 if (state.preview == null && state.pending == null && state.messageId != null) {
                     OutlinedTextField(body, { body = it }, label = { Text("纯文本回复") }, minLines = 5, enabled = !state.busy, modifier = Modifier.fillMaxWidth())
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = includeOriginal, onCheckedChange = { includeOriginal = it }, enabled = !state.busy)
+                        Text("包含原邮件")
+                    }
                     Text("下一步先查看服务器生成的收件人和完整内容，再确认发送。", style = MaterialTheme.typography.bodySmall)
                 }
                 state.pending?.let { pending ->
@@ -203,7 +209,7 @@ private fun formatDate(value: String): String = runCatching { OffsetDateTime.par
         },
         confirmButton = {
             if (state.status == "prepared" && state.preview != null) Button(onClick = { controller.send(canWrite) }, enabled = !state.busy && canWrite) { Text("确认发送") }
-            else if (state.messageId != null && state.pending == null && state.status == null) Button(onClick = { controller.prepare(body) }, enabled = !state.busy && body.isNotBlank() && canWrite) { Text("预览回复") }
+            else if (state.messageId != null && state.pending == null && state.status == null) Button(onClick = { controller.prepare(body, includeOriginal) }, enabled = !state.busy && body.isNotBlank() && canWrite) { Text("预览回复") }
         },
         dismissButton = { TextButton(onClick = controller::hide) { Text(if (state.status == "sent") "完成" else "返回") } })
 }

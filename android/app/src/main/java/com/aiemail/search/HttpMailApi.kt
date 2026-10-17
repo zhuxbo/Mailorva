@@ -33,9 +33,9 @@ class HttpMailApi(private val connection: Connection) : MailApi, ReplyApi {
     )
     override suspend fun message(id: String): MailMessage = get(endpoint("api/messages").newBuilder().addPathSegment(id).build())
 
-    override suspend fun prepareReply(messageId: String, operationId: String, body: String): ReplyPreview = request(
+    override suspend fun prepareReply(messageId: String, operationId: String, body: String, includeOriginal: Boolean): ReplyPreview = request(
         endpoint("api/messages").newBuilder().addPathSegment(messageId).addPathSegment("reply").addPathSegment("prepare").build(),
-        buildJsonObject { put("operation_id", operationId); put("body_text", body) }.toString(),
+        buildJsonObject { put("operation_id", operationId); put("body_text", body); put("include_original", includeOriginal) }.toString(),
     )
     override suspend fun sendReply(operationId: String): SendStatus = request(endpoint("api/send").newBuilder().addPathSegment(operationId).addPathSegment("send").build(), "{}")
     override suspend fun replyStatus(operationId: String): SendStatus = get(endpoint("api/send").newBuilder().addPathSegment(operationId).build())

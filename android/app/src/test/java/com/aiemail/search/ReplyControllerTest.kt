@@ -18,13 +18,15 @@ class ReplyControllerTest {
     private class FakeApi : ReplyApi {
         var sends = 0
         var prepares = 0
+        var includedOriginal: Boolean? = null
         var queries = 0
         var failSend = false
         var failPrepare = false
         var status = "prepared"
         var sendGate: CompletableDeferred<Unit>? = null
-        override suspend fun prepareReply(messageId: String, operationId: String, body: String): ReplyPreview {
+        override suspend fun prepareReply(messageId: String, operationId: String, body: String, includeOriginal: Boolean): ReplyPreview {
             prepares++
+            includedOriginal = includeOriginal
             if (failPrepare) throw ApiException("network")
             return ReplyPreview(operationId, "prepared", "source", "work", "me@example.com", listOf("reply@example.com"), "Re: Test", body)
         }
@@ -35,6 +37,20 @@ class ReplyControllerTest {
             return SendStatus(operationId, "sent", "sent-message")
         }
         override suspend fun replyStatus(operationId: String): SendStatus { queries++; return SendStatus(operationId, status) }
+    }
+    @Test fun quoteDefaultsOnAndCanBeDisabled() = runTest {
+        val api = FakeApi()
+        val controller = ReplyController(api, this, "https://mail/", MemoryPending())
+        controller.start(MailMessage("source"), true)
+        controller.prepare("hello")
+        runCurrent()
+        assertEquals(true, api.includedOriginal)
+        controller.acknowledgeAndClear()
+        controller.start(MailMessage("source"), true)
+        controller.prepare("hello", false)
+        runCurrent()
+        assertEquals(false, api.includedOriginal)
+        assertEquals("hello", controller.state.value.preview!!.bodyText)
     }
     @Test fun readonlyCannotPrepare() = runTest {
         val api = FakeApi()

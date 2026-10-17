@@ -61,6 +61,7 @@ class MailApiTest {
             assertEquals("Bearer writer", prepare.getHeader("Authorization"))
             val requestBody = kotlinx.serialization.json.Json.parseToJsonElement(prepare.body.readUtf8()).toString()
             assertTrue(requestBody.contains("operation_id"))
+            assertTrue(requestBody.contains("\"include_original\":true"))
             assertFalse(requestBody.contains("reply@example.com"))
             server.enqueue(MockResponse().setBody("""{"operation_id":"operation","status":"sent","message_id":"sent-id"}"""))
             assertEquals("sent", api.sendReply("operation").status)

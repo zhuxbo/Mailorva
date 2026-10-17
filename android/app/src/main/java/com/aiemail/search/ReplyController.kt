@@ -32,7 +32,7 @@ interface PendingReplyStore {
     fun clearPending()
 }
 interface ReplyApi {
-    suspend fun prepareReply(messageId: String, operationId: String, body: String): ReplyPreview
+    suspend fun prepareReply(messageId: String, operationId: String, body: String, includeOriginal: Boolean = true): ReplyPreview
     suspend fun sendReply(operationId: String): SendStatus
     suspend fun replyStatus(operationId: String): SendStatus
 }
@@ -64,7 +64,7 @@ class ReplyController(private val api: ReplyApi, private val scope: CoroutineSco
     }
     fun show() { mutableState.update { it.copy(visible = true) } }
     fun hide() { mutableState.update { it.copy(visible = false) } }
-    fun prepare(body: String) {
+    fun prepare(body: String, includeOriginal: Boolean = true) {
         val current = state.value
         val messageId = current.messageId ?: return
         if (current.busy || current.pending != null || storageUnreadable) return
@@ -75,7 +75,7 @@ class ReplyController(private val api: ReplyApi, private val scope: CoroutineSco
         mutableState.update { it.copy(busy = true, pending = pending, error = null) }
         scope.launch {
             try {
-                val preview = api.prepareReply(messageId, pending.operationId, body)
+                val preview = api.prepareReply(messageId, pending.operationId, body, includeOriginal)
                 check(preview.operationId == pending.operationId)
                 val updated = pending.copy(accountId = preview.accountId, preview = preview)
                 store.savePending(updated)
