@@ -18,6 +18,7 @@ func checkAliasIdentity() async throws {
     StubProtocol.handler = { request in
         let input = try requestBody(request)
         try expect(input["from_address"] as? String == "support@example.com")
+        try expect(input["include_original"] as? Bool == false)
         return (200, Data(preview.utf8))
     }
     let result = try await api.prepareReply(id: "m", operationId: "op", body: "Reply", fromAddress: "support@example.com")

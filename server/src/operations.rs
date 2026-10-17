@@ -27,6 +27,29 @@ pub struct PrepareReply {
     pub from_address: Option<String>,
     pub operation_id: String,
     pub body_text: String,
+    #[serde(default = "default_include_original")]
+    pub include_original: bool,
+}
+fn default_include_original() -> bool {
+    true
+}
+fn quoted_reply(body: &str, original: &crate::model::Message) -> String {
+    let text = format!(
+        "-------- 原邮件 --------\n发件人：{}\n收件人：{}\n时间：{}\n主题：{}\n\n{}",
+        original.from_address,
+        original.to_addresses.join(", "),
+        original.received_at,
+        original.subject,
+        original.body_text
+    );
+    let quote = text
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .split('\n')
+        .map(|line| format!("> {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{body}\n\n{quote}")
 }
 #[derive(Serialize)]
 pub struct ReplyPreview {
@@ -57,6 +80,11 @@ impl Service {
             return Err(AppError::Invalid);
         }
         let parent = self.db.message(id).await?;
+        let body_text = if input.include_original {
+            quoted_reply(&input.body_text, &parent)
+        } else {
+            input.body_text
+        };
         let account = self.mail_account(&parent.account_id).await?;
         let from_address = match input.from_address.as_deref() {
             Some(value) => account.sender(value).ok_or(AppError::Invalid)?,
@@ -83,7 +111,7 @@ impl Service {
             to: to.clone(),
             cc: vec![],
             subject: subject.clone(),
-            body_text: input.body_text.clone(),
+            body_text: body_text.clone(),
             reply_to_id: Some(id.into()),
         };
         let operation = self.prepare_send(outgoing).await?;
@@ -94,7 +122,7 @@ impl Service {
             account_email: from_address,
             to,
             subject,
-            body_text: input.body_text,
+            body_text,
         })
     }
 

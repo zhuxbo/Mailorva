@@ -996,12 +996,17 @@ async fn oauth_reply_requires_human_confirmation_and_sends_once() {
     let preview = f.prepare_reply(access, "reply-1").await;
     assert_eq!(preview["to"], json!(["vendor@example.com"]));
     assert_eq!(preview["from_address"], "alias@example.com");
+    assert!(preview["body_text"]
+        .as_str()
+        .unwrap()
+        .contains("\n> 原邮件"));
     assert_eq!(f.fake.sends.load(Ordering::SeqCst), 0);
     let url = preview["confirmation_url"].as_str().unwrap();
     let path = url.strip_prefix(RESOURCE.trim_end_matches('/')).unwrap();
     let (nonce, cookie, body) = f.confirmation(path).await;
     assert!(!body.contains("name=\"approval_secret\""));
     assert!(body.contains("&lt;script&gt;"));
+    assert!(body.contains("&gt; 原邮件"));
     assert!(!body.contains("<script>"));
     assert!(body.contains("alias@example.com") && body.contains("vendor@example.com"));
     let headers = [
@@ -1023,6 +1028,10 @@ async fn oauth_reply_requires_human_confirmation_and_sends_once() {
         Some("<1@example.com>")
     );
     assert_eq!(outgoing[0].1.from_address, "alias@example.com");
+    assert_eq!(
+        outgoing[0].1.body_text,
+        preview["body_text"].as_str().unwrap()
+    );
 }
 #[tokio::test]
 async fn oauth_reply_rejects_bypass_cross_grant_and_revoked_confirmation() {

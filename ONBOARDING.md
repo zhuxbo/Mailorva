@@ -129,7 +129,8 @@ location = /.well-known/oauth-authorization-server/mail-mcp {
 
 回复授权仅增加 `prepare_reply` 和 `get_reply_status`：
 
-- `prepare_reply` 提交原邮件 `id`、唯一 `operation_id`、`body_text` 及可选 `from_address`。服务端固定原账号、Reply-To（无则 From）收件人和回复主题，发件人只能是账号主地址或已配置别名；不能添加抄送或任意收件人。
+- `prepare_reply` 提交原邮件 `id`、唯一 `operation_id`、`body_text` 及可选 `from_address`、`include_original`。`body_text` 默认只填写新增回复，服务端自动附加原邮件的发件人、收件人、时间、主题和纯文本正文；已由客户端引用或明确不引用时传 `include_original=false`，避免重复引用。服务端固定原账号、Reply-To（无则 From）收件人和回复主题，发件人只能是账号主地址或已配置别名；不能添加抄送或任意收件人。
+- 升级默认引用功能时需同步更新服务端与 macOS App：旧 macOS 已自行引用但不会传 `include_original=false`，连接新服务会重复引用；新 App 的该参数需要新版服务端支持。Android 继续提交新增正文，由服务端引用。
 - 返回完整预览和 `confirmation_url`。助手应把链接交给用户本人；用户在独立页面核对完整内容，无需再次输入授权口令，点击“确认发送这封回复”。此点击立即发送，助手不得代为确认。确认链接应仅由用户本人打开，不要转发。MCP 没有可绕过页面的 OAuth 发送工具。
 - 回复自准备起 30 分钟有效，页面确认凭证 10 分钟有效且一次使用。修改正文需新操作编号并重新确认；相同编号不能换内容。不同 OAuth 授权的操作互相隔离，授权撤销或过期后不能确认发送。
 - `get_reply_status` 用原 `operation_id` 查询状态；`unknown` 必须人工检查发件箱，不得自动重发。`list_accounts` 返回 `can_reply` 表示 OAuth 回复能力，`can_write` 仍为 false。

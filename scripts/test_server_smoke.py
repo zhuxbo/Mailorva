@@ -180,7 +180,8 @@ class ServerSmokeTests(unittest.TestCase):
         self.assertEqual(preview['account_email'], 'work@example.com')
         self.assertEqual(preview['to'], ['vendor@example.com'])
         self.assertEqual(preview['subject'], 'Re: 证书到期')
-        self.assertEqual(preview['body_text'], body['body_text'])
+        self.assertTrue(preview['body_text'].startswith(body['body_text'] + '\n\n> -------- 原邮件 --------'))
+        self.assertIn('> 订单 100%_完成', preview['body_text'])
         self.assertEqual(preview['status'], 'prepared')
         self.assertEqual(self.request(route, token=WRITE_TOKEN, payload=body), preview)
 

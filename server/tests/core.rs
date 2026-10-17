@@ -603,7 +603,20 @@ async fn reply_prepare_derives_recipient_account_preview_and_is_idempotent() {
     assert_eq!(preview["account_email"], "b@example.com");
     assert_eq!(preview["to"], json!(["reply-desk@example.com"]));
     assert_eq!(preview["subject"], "Re: 证书通知");
-    assert_eq!(preview["body_text"], "谢谢，已收到。");
+    let quoted = preview["body_text"].as_str().unwrap();
+    assert!(quoted.starts_with("谢谢，已收到。\n\n> -------- 原邮件 --------\n"));
+    assert!(quoted.contains(&format!("> {}", data["body_text"].as_str().unwrap())));
+    let (code, plain) = http(
+        app.clone(),
+        "POST",
+        &path,
+        Some(&write),
+        None,
+        json!({"operation_id":"plain-reply","body_text":"不要引用","include_original":false}),
+    )
+    .await;
+    assert_eq!(code, 200);
+    assert_eq!(plain["body_text"], "不要引用");
     assert_eq!(preview["status"], "prepared");
     assert_eq!(f.fake.sends.load(Ordering::SeqCst), 0);
     let (_, replay) = http(app.clone(), "POST", &path, Some(&write), None, body.clone()).await;
@@ -663,7 +676,7 @@ async fn reply_prepare_derives_recipient_account_preview_and_is_idempotent() {
             outgoing[0].1.references,
             vec![data["message_id"].as_str().unwrap()]
         );
-        assert_eq!(outgoing[0].1.body_text, "谢谢，已收到。");
+        assert_eq!(outgoing[0].1.body_text, quoted);
     }
     let (_, replay) = http(app, "POST", &path, Some(&write), None, body).await;
     assert_eq!(replay["status"], "unknown");

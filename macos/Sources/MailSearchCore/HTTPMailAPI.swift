@@ -71,9 +71,10 @@ public final class HTTPMailAPI: MailAPI, ReplyAPI, AccountSettingsAPI, @unchecke
         return result.flags
     }
     public func prepareReply(id: String, operationId: String, body: String, fromAddress: String? = nil) async throws -> ReplyPreview {
-        var input = ["operation_id": operationId, "body_text": body]
+        // ReplyView already applies the user's quote toggle to the complete body.
+        var input: [String: Any] = ["operation_id": operationId, "body_text": body, "include_original": false]
         if let fromAddress { input["from_address"] = fromAddress }
-        let preview: ReplyPreview = try await request(["api", "messages", id, "reply", "prepare"], body: input)
+        let preview: ReplyPreview = try await request(["api", "messages", id, "reply", "prepare"], method: "POST", jsonBody: JSONSerialization.data(withJSONObject: input))
         // An older server must not silently send from the primary account instead of the chosen alias.
         if let fromAddress, preview.senderAddress.caseInsensitiveCompare(fromAddress) != .orderedSame {
             throw ClientError.invalidResponse
