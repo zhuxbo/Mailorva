@@ -33,11 +33,11 @@ jobs:
       - run: cargo build --locked --release --manifest-path server/Cargo.toml
       - run: python3 -m unittest discover -s scripts -p 'test_*.py'
         env:
-          AI_EMAIL_TEST_BINARY: ${{ github.workspace }}/server/target/release/ai-email-server
+          MAILORVA_TEST_BINARY: ${{ github.workspace }}/server/target/release/mailorva-server
       - uses: actions/upload-artifact@v7
         with:
-          name: ai-email-server-linux-x64
-          path: server/target/release/ai-email-server
+          name: mailorva-server-linux-x64
+          path: server/target/release/mailorva-server
 
   native-android:
     name: Native Android Search
@@ -55,7 +55,7 @@ jobs:
         run: ./gradlew --no-daemon testDebugUnitTest lintDebug assembleDebug
       - uses: actions/upload-artifact@v7
         with:
-          name: ai-email-native-search-debug
+          name: mailorva-native-search-debug
           path: android/app/build/outputs/apk/debug/app-debug.apk
 
   native-macos:
@@ -66,9 +66,9 @@ jobs:
       - name: Check native client behavior and build macOS app
         run: swift run --package-path macos MailSearchChecks && bash scripts/build-macos-search.sh
       - name: Archive app preserving executable permissions
-        run: tar -czf macos/build/AI-Email-macos.tar.gz -C macos/build 'AI Email.app'
+        run: tar -czf macos/build/Mailorva-macos.tar.gz -C macos/build 'Mailorva.app'
       - uses: actions/upload-artifact@v7
         with:
-          name: ai-email-native-macos
-          path: macos/build/AI-Email-macos.tar.gz
+          name: mailorva-native-macos
+          path: macos/build/Mailorva-macos.tar.gz
           if-no-files-found: error

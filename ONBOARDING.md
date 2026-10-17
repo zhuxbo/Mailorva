@@ -25,29 +25,29 @@ bash scripts/build-macos-search.sh
 
 设置 `ANDROID_HOME` 或在忽略的 `android/local.properties` 中配置 `sdk.dir`。原生 App 不需要 Rust Android target 或 NDK。可使用 Android Studio 打开 `android/`。
 
-本机调试服务可绑定 `127.0.0.1:8080`。安卓模拟器通过 `10.0.2.2` 访问宿主机；只有 Debug 构建且显式开启开发选项才允许这个地址使用 HTTP，安卓真机使用 HTTPS。macOS Release 可使用私有 IPv4 或 IPv6 ULA 地址的 HTTP；公网和域名使用 HTTPS。stdio 桥接仅在设置 `AI_EMAIL_ALLOW_HTTP=1` 后允许 localhost / loopback HTTP。
+本机调试服务可绑定 `127.0.0.1:8080`。安卓模拟器通过 `10.0.2.2` 访问宿主机；只有 Debug 构建且显式开启开发选项才允许这个地址使用 HTTP，安卓真机使用 HTTPS。macOS Release 可使用私有 IPv4 或 IPv6 ULA 地址的 HTTP；公网和域名使用 HTTPS。stdio 桥接仅在设置 `MAILORVA_ALLOW_HTTP=1` 后允许 localhost / loopback HTTP。
 
 ## Linux 单机部署
 
-以下命令是部署操作说明，不会由测试自动执行。先在目标 Linux 架构构建 `server/target/release/ai-email-server`，配置域名 DNS，安装 Caddy。不要把 macOS 构建的二进制复制到 Linux。
+以下命令是部署操作说明，不会由测试自动执行。先在目标 Linux 架构构建 `server/target/release/mailorva-server`，配置域名 DNS，安装 Caddy。不要把 macOS 构建的二进制复制到 Linux。
 
 创建专用用户和目录：
 
 ```bash
-sudo useradd --system --home /var/lib/ai-email --shell /usr/sbin/nologin ai-email
-sudo install -d -m 0755 /opt/ai-email
-sudo install -d -m 0750 -o root -g ai-email /etc/ai-email
-sudo install -d -m 0700 -o ai-email -g ai-email /var/lib/ai-email
-sudo install -m 0755 server/target/release/ai-email-server /opt/ai-email/ai-email-server
-sudo install -m 0640 -o root -g ai-email server/config.example.json /etc/ai-email/config.json
+sudo useradd --system --home /var/lib/mailorva --shell /usr/sbin/nologin mailorva
+sudo install -d -m 0755 /opt/mailorva
+sudo install -d -m 0750 -o root -g mailorva /etc/mailorva
+sudo install -d -m 0700 -o mailorva -g mailorva /var/lib/mailorva
+sudo install -m 0755 server/target/release/mailorva-server /opt/mailorva/mailorva-server
+sudo install -m 0640 -o root -g mailorva server/config.example.json /etc/mailorva/config.json
 ```
 
 生成两份独立令牌，避免在日志中打印：
 
 ```bash
-sudo sh -c 'umask 077; openssl rand -hex 32 > /etc/ai-email/read-token; openssl rand -hex 32 > /etc/ai-email/write-token'
-sudo chown root:ai-email /etc/ai-email/read-token /etc/ai-email/write-token
-sudo chmod 0640 /etc/ai-email/read-token /etc/ai-email/write-token
+sudo sh -c 'umask 077; openssl rand -hex 32 > /etc/mailorva/read-token; openssl rand -hex 32 > /etc/mailorva/write-token'
+sudo chown root:mailorva /etc/mailorva/read-token /etc/mailorva/write-token
+sudo chmod 0640 /etc/mailorva/read-token /etc/mailorva/write-token
 ```
 
 首次部署保留配置的 `accounts: []`，无需先准备邮箱授权码。启动后在 macOS App 用可写令牌连接，再通过“软件设置 → 邮箱账号”添加账户；最多 10 个，不允许重复邮箱，服务自动生成稳定且不可复用的账户 id。授权码只保存在服务端数据库。
@@ -57,11 +57,11 @@ sudo chmod 0640 /etc/ai-email/read-token /etc/ai-email/write-token
 示例 `allowed_hosts` 中的 `mail.example.com` 应替换成实际域名；服务只监听 loopback。`allowed_origins: []` 适合不带 Origin 的原生客户端；若 AI 客户端发送 Origin，填入其完整且明确的来源，不使用通配符。
 
 ```bash
-sudo install -m 0644 deploy/ai-email.service /etc/systemd/system/ai-email.service
+sudo install -m 0644 deploy/mailorva.service /etc/systemd/system/mailorva.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now ai-email
-sudo systemctl status ai-email
-sudo journalctl -u ai-email -n 50
+sudo systemctl enable --now mailorva
+sudo systemctl status mailorva
+sudo journalctl -u mailorva -n 50
 ```
 
 公网部署将 `deploy/Caddyfile` 的站点配置合并进服务器 Caddy 配置，替换实际域名，验证配置后重载。不要覆盖服务器上的其他站点；后端仅监听 loopback。
@@ -88,9 +88,9 @@ Android 和 macOS 各自只保存一个访问令牌：只读令牌仅能搜索�
 生成独立高熵授权口令，不复用邮箱密码或现有访问令牌：
 
 ```bash
-sudo sh -c 'umask 077; openssl rand -hex 32 > /etc/ai-email/oauth-approval-secret'
-sudo chown root:ai-email /etc/ai-email/oauth-approval-secret
-sudo chmod 0640 /etc/ai-email/oauth-approval-secret
+sudo sh -c 'umask 077; openssl rand -hex 32 > /etc/mailorva/oauth-approval-secret'
+sudo chown root:mailorva /etc/mailorva/oauth-approval-secret
+sudo chmod 0640 /etc/mailorva/oauth-approval-secret
 ```
 
 在配置中加入以下字段后重启服务。`issuer` 不带末尾斜杠；`resource` 必须与助手配置的 MCP URL 完全一致，二者必须同源。直接使用现有 Caddy 整站反代时可采用：
@@ -99,7 +99,7 @@ sudo chmod 0640 /etc/ai-email/oauth-approval-secret
 "oauth": {
   "issuer": "https://mail.example.com",
   "resource": "https://mail.example.com/mcp",
-  "approval_secret": { "file": "/etc/ai-email/oauth-approval-secret" },
+  "approval_secret": { "file": "/etc/mailorva/oauth-approval-secret" },
   "allowed_redirect_origins": ["https://chatgpt.com"]
 }
 ```
@@ -121,7 +121,7 @@ location = /.well-known/oauth-authorization-server/mail-mcp {
 }
 ```
 
-配置 ChatGPT 自定义 MCP 时填写公网 `resource` 地址，认证选择 OAuth，使用动态注册（DCR），无需手工填写 client ID/secret。安装并连接插件，在 AI Email 授权页核对客户端名称、回调地址及请求权限后输入专用授权口令。不要将口令或访问令牌粘贴到聊天中。
+配置 ChatGPT 自定义 MCP 时填写公网 `resource` 地址，认证选择 OAuth，使用动态注册（DCR），无需手工填写 client ID/secret。安装并连接插件，在 Mailorva 授权页核对客户端名称、回调地址及请求权限后输入专用授权口令。不要将口令或访问令牌粘贴到聊天中。
 
 权限默认 `mail:read`；选择 `mail:read mail:reply` 可增加回复已有邮件的能力。旧授权和刷新令牌不会自动获得回复权限，必须重新授权；刷新只能保持或缩小权限。OAuth 令牌仍不能调用 REST API，也不开放通用发送、移动、标记及邮箱管理工具。
 
@@ -178,9 +178,9 @@ location = /.well-known/oauth-authorization-server/mail-mcp {
 
 ## 本机检查与 CI
 
-macOS 使用 `swift run --package-path macos MailSearchChecks` 执行原生可执行检查，不依赖完整 Xcode 的 XCTest 环境。`scripts/build-macos-search.sh` 生成 `macos/build/AI Email.app`，CI 用 tar.gz 保留可执行权限；当前构建不承担正式签名、公证或发布。
+macOS 使用 `swift run --package-path macos MailSearchChecks` 执行原生可执行检查，不依赖完整 Xcode 的 XCTest 环境。`scripts/build-macos-search.sh` 生成 `macos/build/Mailorva.app`，CI 用 tar.gz 保留可执行权限；当前构建不承担正式签名、公证或发布。
 
-macOS 构建按图标内容生成资源文件名，避免替换图标后系统继续使用同名缓存。修改 `macos/AppIcon.icns` 后重新构建并重新打开 App。
+macOS 构建在 Swift 编译成功后重新创建 `macos/build/Mailorva.app`，避免旧图标、可执行文件和签名资源混入应用包。图标按内容生成资源文件名，避免系统沿用同名缓存。修改 `macos/AppIcon.icns` 后重新构建并重新打开 App。
 
 Git 检查使用独立安装的 `lefthook` 和 `gitleaks`，不依赖 Node。macOS 可通过 `brew install lefthook gitleaks` 安装，再运行 `lefthook install`。现有 Git hooks 会优先调用 PATH 中的 lefthook；不得用 `--no-verify` 跳过失败检查。提交前检查 Rust 格式、clippy、凭据及标题格式；推送前检查服务端测试与 Python 桥接/冒烟。Android 和 macOS 检查按改动范围执行，CI 分别构建。
 

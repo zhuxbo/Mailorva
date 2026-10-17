@@ -4,7 +4,7 @@ import MailSearchCore
 @main @MainActor struct MailSearchApp: App {
     @StateObject private var session = ClientSession()
     var body: some Scene {
-        Window("AI Email", id: "main") {
+        Window("Mailorva", id: "main") {
             RootView(session: session).frame(minWidth: 860, minHeight: 540)
         }.defaultSize(width: 1080, height: 740)
     }
@@ -21,7 +21,7 @@ struct RootView: View {
                 VStack(spacing: 16) {
                     Image(systemName: "envelope.badge.magnifyingglass").font(.system(size: 48)).foregroundStyle(.tint)
                     Text("搜索所有邮箱").font(.title2.weight(.semibold))
-                    Text("连接你的 AI Email 服务器，搜索、阅读并回复邮件。").foregroundStyle(.secondary)
+                    Text("连接你的 Mailorva 服务器，搜索、阅读并回复邮件。").foregroundStyle(.secondary)
                     if let error = session.error { Text(error).foregroundStyle(.red) }
                     Button("设置服务器连接") { settings = true }.buttonStyle(.borderedProminent)
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)

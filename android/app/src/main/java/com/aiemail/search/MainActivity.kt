@@ -60,7 +60,7 @@ class MainActivity : ComponentActivity() {
     if (reply != null && replyState?.visible == true) ReplyDialog(replyState, reply, state.canWrite)
     BackHandler(state.selectedId != null) { active.closeMessage() }
     Scaffold(topBar = {
-        TopAppBar(title = { Text(if (state.selectedId == null) "邮件检索" else "邮件详情") },
+        TopAppBar(title = { Text(if (state.selectedId == null) "Mailorva" else "邮件详情") },
             navigationIcon = { if (state.selectedId != null) TextButton(onClick = active::closeMessage) { Text("返回") } },
             actions = {
                 if (replyState?.pending != null || replyState?.error != null) TextButton(onClick = { reply?.show() }) { Text("回复核对") }

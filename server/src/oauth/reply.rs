@@ -110,7 +110,7 @@ struct Confirmation {
 }
 fn page(content: &str) -> Html<String> {
     Html(format!(
-        r#"<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Email · 确认回复</title><style>body{{font:16px/1.7 system-ui,sans-serif;background:#f5f6f8;color:#20242a;margin:0;padding:24px}}main{{max-width:760px;margin:3vh auto;padding:28px;background:white;border:1px solid #dde1e6;border-radius:16px}}h1{{font-size:24px}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;background:#f5f6f8;padding:16px}}p{{overflow-wrap:anywhere}}button{{font:inherit;padding:12px 20px;border:0;border-radius:8px;background:#2053c9;color:white;cursor:pointer}}</style><main>{content}</main></html>"#
+        r#"<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mailorva · 确认回复</title><style>body{{font:16px/1.7 system-ui,sans-serif;background:#f5f6f8;color:#20242a;margin:0;padding:24px}}main{{max-width:760px;margin:3vh auto;padding:28px;background:white;border:1px solid #dde1e6;border-radius:16px}}h1{{font-size:24px}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;background:#f5f6f8;padding:16px}}p{{overflow-wrap:anywhere}}button{{font:inherit;padding:12px 20px;border:0;border-radius:8px;background:#2053c9;color:white;cursor:pointer}}</style><main>{content}</main></html>"#
     ))
 }
 async fn preview(State(s): State<Arc<Service>>, Path(id): Path<String>) -> Result<Response> {

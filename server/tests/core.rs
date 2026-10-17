@@ -1,4 +1,7 @@
-use ai_email_server::{
+use async_trait::async_trait;
+use axum::{body::Body, http::Request};
+use http_body_util::BodyExt;
+use mailorva_server::{
     api,
     config::Config,
     db::Database,
@@ -7,9 +10,6 @@ use ai_email_server::{
     operations::PrepareSend,
     Service,
 };
-use async_trait::async_trait;
-use axum::{body::Body, http::Request};
-use http_body_util::BodyExt;
 use serde_json::{json, Value};
 use std::sync::{
     atomic::{AtomicU32, AtomicUsize, Ordering},
@@ -473,7 +473,7 @@ async fn wait_for_account_waiters(guard: &tokio::sync::OwnedMutexGuard<()>, expe
 }
 #[tokio::test]
 async fn concurrent_flag_changes_preserve_both_updates() {
-    use ai_email_server::operations::FlagChange;
+    use mailorva_server::operations::FlagChange;
     let f = Fixture::new(true);
     let s = f.service().await;
     s.sync_account("a").await.unwrap();

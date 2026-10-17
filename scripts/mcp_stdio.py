@@ -62,7 +62,7 @@ class HttpBridge:
     def __init__(self, url, token, allow_http=False):
         self.url = validate_url(url, allow_http)
         if not token or any(ord(char) < 32 or ord(char) > 126 for char in token):
-            raise ValueError("请通过 AI_EMAIL_TOKEN 设置有效的访问令牌")
+            raise ValueError("请通过 MAILORVA_TOKEN 设置有效的访问令牌")
         self.token = token
         self.session = None
         self.version = None
@@ -119,11 +119,16 @@ def write_message(message):
     sys.stdout.flush()
 
 
+def env_setting(name):
+    # 优先使用新名称；未配置时兼容已有客户端的环境变量。
+    return os.environ.get('MAILORVA_' + name, os.environ.get('AI_EMAIL_' + name, ''))
+
+
 def main():
     try:
-        client = HttpBridge(os.environ.get('AI_EMAIL_URL', ''),
-                            os.environ.get('AI_EMAIL_TOKEN', ''),
-                            os.environ.get('AI_EMAIL_ALLOW_HTTP') == '1')
+        client = HttpBridge(env_setting('URL'),
+                            env_setting('TOKEN'),
+                            env_setting('ALLOW_HTTP') == '1')
     except ValueError as error:
         print(str(error), file=sys.stderr)
         return 2

@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
-BINARY = Path(os.environ.get('AI_EMAIL_TEST_BINARY', ROOT / 'server/target/debug/ai-email-server'))
+BINARY = Path(os.environ.get('MAILORVA_TEST_BINARY', ROOT / 'server/target/debug/mailorva-server'))
 READ_TOKEN = 'r' * 64
 WRITE_TOKEN = 'w' * 64
 
@@ -25,7 +25,7 @@ class ServerSmokeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         if not BINARY.is_file():
-            raise RuntimeError('先构建服务，或设置 AI_EMAIL_TEST_BINARY 为服务二进制路径')
+            raise RuntimeError('先构建服务，或设置 MAILORVA_TEST_BINARY 为服务二进制路径')
         cls.temp = tempfile.TemporaryDirectory()
         cls.addClassCleanup(cls.temp.cleanup)
         folder = Path(cls.temp.name)
@@ -126,8 +126,8 @@ class ServerSmokeTests(unittest.TestCase):
                 params = {**params, '_meta': metadata}
             messages.append({'jsonrpc': '2.0', 'id': index, 'method': method, 'params': params})
         completed = subprocess.run([sys.executable, str(ROOT / 'scripts/mcp_stdio.py')],
-            env={**os.environ, 'AI_EMAIL_URL': self.url + '/mcp', 'AI_EMAIL_TOKEN': token,
-                 'AI_EMAIL_ALLOW_HTTP': '1'},
+            env={**os.environ, 'MAILORVA_URL': self.url + '/mcp', 'MAILORVA_TOKEN': token,
+                 'MAILORVA_ALLOW_HTTP': '1'},
             input=''.join(json.dumps(m) + '\n' for m in messages), text=True, capture_output=True, timeout=20)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(completed.stderr, '')
@@ -135,8 +135,10 @@ class ServerSmokeTests(unittest.TestCase):
         self.assertEqual(len(result), len(calls) + 1)
         self.assertIn('result', result[0])
         if modern:
+            self.assertEqual(result[0]['result']['_meta']['io.modelcontextprotocol/serverInfo']['name'], 'Mailorva')
             self.assertIn(version, result[0]['result']['supportedVersions'])
         else:
+            self.assertEqual(result[0]['result']['serverInfo']['name'], 'Mailorva')
             self.assertEqual(result[0]['result']['protocolVersion'], version)
         return result[1:]
 

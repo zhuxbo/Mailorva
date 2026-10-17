@@ -1,4 +1,4 @@
-# AI Email 协作规则
+# Mailorva 协作规则
 
 产品范围见 [README.md](README.md)，开发与部署见 [ONBOARDING.md](ONBOARDING.md)。用户当前目标是个人服务器聚合邮箱、原生 Android/macOS 搜索和简单回复、复杂任务通过标准 MCP 交给外部 AI 处理。
 

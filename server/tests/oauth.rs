@@ -1,4 +1,3 @@
-use ai_email_server::{api, config::Config, mail::*, Service};
 use axum::{
     body::Body,
     http::{HeaderMap, Request, StatusCode},
@@ -6,6 +5,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use http_body_util::BodyExt;
+use mailorva_server::{api, config::Config, mail::*, Service};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -47,8 +47,8 @@ async fn oauth_registered_client_metadata_cannot_be_tampered() {
     assert!(!h.contains_key("location"));
 }
 
-use ai_email_server::model::now;
 use async_trait::async_trait;
+use mailorva_server::model::now;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 #[derive(Default)]
 struct Fake {
@@ -1207,7 +1207,7 @@ async fn oauth_existing_token_schema_migrates_to_readonly() {
         .execute(&f.service.db.pool)
         .await
         .unwrap();
-    let oauth = ai_email_server::oauth::OAuth::new(
+    let oauth = mailorva_server::oauth::OAuth::new(
         f.service.config.oauth.clone().unwrap(),
         f.service.db.pool.clone(),
     )

@@ -1,15 +1,15 @@
 [Unit]
-Description=AI Email aggregation and MCP server
+Description=Mailorva aggregation and MCP server
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=ai-email
-Group=ai-email
-ExecStart=/opt/ai-email/ai-email-server /etc/ai-email/config.json
-WorkingDirectory=/var/lib/ai-email
-StateDirectory=ai-email
+User=mailorva
+Group=mailorva
+ExecStart=/opt/mailorva/mailorva-server /etc/mailorva/config.json
+WorkingDirectory=/var/lib/mailorva
+StateDirectory=mailorva
 StateDirectoryMode=0700
 UMask=0077
 Restart=on-failure
@@ -18,7 +18,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/ai-email
+ReadWritePaths=/var/lib/mailorva
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 
 [Install]

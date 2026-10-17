@@ -1,4 +1,4 @@
-# AI Email
+# Mailorva
 
 面向个人的多邮箱聚合服务：服务器保存需要检索的邮件，Android 和 macOS 原生 App 用于搜索及简单回复，复杂邮件处理交给外部 AI 客户端通过 MCP 完成。
 
@@ -13,6 +13,12 @@
 - 搜索覆盖标题、纯文本正文，以及所属账户、发件人、收件人和抄送邮箱。支持中文子串、多个关键词同时命中和按账户筛选；不搜索附件内容，不调用 AI 分类或向量服务。
 - Android 和 macOS 提供连接设置、搜索、分页、纯文本详情和简单回复；macOS 另有邮箱管理和首次配置，邮箱筛选与搜索框同排，输入即搜索；邮件数量旁的“刷新”更新邮件列表，设置页的账号加载和刷新仅更新账号列表。没有通知、后台常驻或内置 AI；只读令牌仅可检索，可写令牌可回复和管理邮箱。
 - MCP 支持列账户、搜索、读邮件/附件、标记已读/星标、移动和准备/发送邮件；不绑定特定 AI 厂商。
+
+## 名称与升级兼容
+
+项目原名 AI Email，现统一使用 Mailorva；服务程序为 `mailorva-server`，macOS 应用为 `Mailorva.app`。Android 应用 ID、macOS Bundle ID/钥匙串标识和 OAuth 内部兼容标识保留原值，以延续已有安装的配置与授权。MCP 桥接优先读取 `MAILORVA_URL`、`MAILORVA_TOKEN`、`MAILORVA_ALLOW_HTTP`，未设置时兼容对应的 `AI_EMAIL_*` 变量。
+
+部署示例中的 `mailorva` 用户、目录和 systemd 服务名用于新安装。已有部署升级时保留原数据库、配置、令牌路径和服务用户，只调整服务程序路径并更新服务描述；不要直接套用新安装命令创建空数据目录。仓库目录和远程仓库名称可独立于产品名保留。
 
 ## 架构
 
@@ -44,10 +50,10 @@ cp server/config.example.json server/config.json
 只读、可写令牌必须不同，分别使用至少 32 字符的随机值；例如用 `openssl rand -hex 32` 生成。令牌和邮箱授权码文件应限制为服务用户可读。每个客户端只填写一个访问令牌：只需搜索时填只读令牌，需要简单回复时填可写令牌；有发信和修改需求的 AI 使用可写令牌。客户端从服务返回的 `can_write` 判断是否显示回复入口，服务仍会验证每次写请求的权限。
 
 ```bash
-server/target/release/ai-email-server server/config.json
+server/target/release/mailorva-server server/config.json
 ```
 
-默认监听 `127.0.0.1:8080`；公网通过 HTTPS 反向代理，macOS 也可通过仅绑定内网 IP 的 HTTP 反代访问。`deploy/ai-email.service` 和 `deploy/Caddyfile` 提供 Linux systemd / Caddy 示例，安装步骤见 [ONBOARDING.md](ONBOARDING.md)。Android 和 stdio 桥接的 HTTP 限制保持不变。
+默认监听 `127.0.0.1:8080`；公网通过 HTTPS 反向代理，macOS 也可通过仅绑定内网 IP 的 HTTP 反代访问。`deploy/mailorva.service` 和 `deploy/Caddyfile` 提供 Linux systemd / Caddy 示例，安装步骤见 [ONBOARDING.md](ONBOARDING.md)。Android 和 stdio 桥接的 HTTP 限制保持不变。
 
 | 服务       | IMAP（TLS 993）      | SMTP（TLS 465）      |
 | ---------- | -------------------- | -------------------- |
@@ -66,12 +72,12 @@ server/target/release/ai-email-server server/config.json
 ```json
 {
   "mcpServers": {
-    "ai-email": {
+    "mailorva": {
       "command": "python3",
-      "args": ["/绝对路径/ai-email/scripts/mcp_stdio.py"],
+      "args": ["/绝对路径/mailorva/scripts/mcp_stdio.py"],
       "env": {
-        "AI_EMAIL_URL": "https://你的域名/mcp",
-        "AI_EMAIL_TOKEN": "在客户端本机配置访问令牌"
+        "MAILORVA_URL": "https://你的域名/mcp",
+        "MAILORVA_TOKEN": "在客户端本机配置访问令牌"
       }
     }
   }
@@ -110,11 +116,11 @@ swift run --package-path macos MailSearchChecks
 bash scripts/build-macos-search.sh
 ```
 
-打开 `macos/build/AI Email.app`，填写服务根地址和一个访问令牌。公网地址使用 HTTPS；内网 IPv4（`10/8`、`172.16/12`、`192.168/16`）或 IPv6 ULA（`fc00::/7`）允许 HTTP，如 `http://192.168.1.10:8080/`。域名即使解析到内网也仍要求 HTTPS；HTTP 仅用于可信内网。
+打开 `macos/build/Mailorva.app`，填写服务根地址和一个访问令牌。公网地址使用 HTTPS；内网 IPv4（`10/8`、`172.16/12`、`192.168/16`）或 IPv6 ULA（`fc00::/7`）允许 HTTP，如 `http://192.168.1.10:8080/`。域名即使解析到内网也仍要求 HTTPS；HTTP 仅用于可信内网。
 
 首次连接使用可写令牌，点击“添加邮箱”。选择服务商，填写邮箱地址、授权码或应用专用密码与同步文件夹，保存后返回列表继续添加，最多 10 个。以后通过“软件设置 → 邮箱账号”编辑或删除；授权码留空表示不变，邮箱地址和 IMAP 身份不可改，更换邮箱需新增。删除只停止同步、清理服务器缓存并取消未执行的发送，不删除远端原信，也不会撤回已发送邮件。账户保存后定期同步，保存成功不代表邮箱登录已验证。
 
-构建结果用于本机安装，未宣称经过 Apple 正式签名、公证或 App Store 分发。CI 将 `.app` 打包为 `AI-Email-macos.tar.gz` 保存执行权限，下载后先解压再打开。
+构建结果用于本机安装，未宣称经过 Apple 正式签名、公证或 App Store 分发。CI 将 `.app` 打包为 `Mailorva-macos.tar.gz` 保存执行权限，下载后先解压再打开。
 
 ## 简单回复
 

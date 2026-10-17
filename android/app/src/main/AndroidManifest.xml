@@ -3,7 +3,7 @@
     <application android:allowBackup="false" android:fullBackupContent="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:networkSecurityConfig="@xml/network_security_config"
-        android:icon="@mipmap/ic_launcher" android:label="邮件检索" android:theme="@style/Theme.MailSearch" android:supportsRtl="true">
+        android:icon="@mipmap/ic_launcher" android:label="Mailorva" android:theme="@style/Theme.MailSearch" android:supportsRtl="true">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

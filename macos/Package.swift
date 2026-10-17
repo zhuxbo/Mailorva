@@ -2,9 +2,9 @@
 import PackageDescription
 
 let package = Package(
-    name: "AIEmailSearch",
+    name: "Mailorva",
     platforms: [.macOS(.v13)],
-    products: [.executable(name: "AIEmailSearch", targets: ["MailSearchApp"])],
+    products: [.executable(name: "Mailorva", targets: ["MailSearchApp"])],
     targets: [
         .target(name: "MailSearchCore"),
         .executableTarget(name: "MailSearchApp", dependencies: ["MailSearchCore"]),

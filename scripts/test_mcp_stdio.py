@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 import threading
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 spec = importlib.util.spec_from_file_location(
@@ -17,6 +17,18 @@ spec.loader.exec_module(bridge)
 
 
 class BridgeTests(unittest.TestCase):
+    def test_environment_names_keep_legacy_compatibility_and_new_name_priority(self):
+        for name in ('URL', 'TOKEN', 'ALLOW_HTTP'):
+            with self.subTest(name=name):
+                with patch.dict(bridge.os.environ, {'AI_EMAIL_' + name: 'legacy'}, clear=True):
+                    self.assertEqual(bridge.env_setting(name), 'legacy')
+                    bridge.os.environ['MAILORVA_' + name] = 'new'
+                    self.assertEqual(bridge.env_setting(name), 'new')
+                    bridge.os.environ['MAILORVA_' + name] = ''
+                    self.assertEqual(bridge.env_setting(name), '')
+                with patch.dict(bridge.os.environ, {}, clear=True):
+                    self.assertEqual(bridge.env_setting(name), '')
+
     def test_rejects_credentials_in_url_and_remote_cleartext(self):
         for url in ("http://example.com/mcp", "https://user:pass@example.com/mcp",
                     "https://example.com/mcp?token=secret", "file:///tmp/mcp"):

@@ -329,7 +329,7 @@ async fn security_headers(
 }
 async fn resource_metadata(State(o): State<Arc<OAuth>>) -> Json<Value> {
     Json(
-        json!({"resource":o.config.resource,"authorization_servers":[o.issuer],"scopes_supported":[SCOPE,"mail:reply"],"bearer_methods_supported":["header"],"resource_name":"AI Email 邮件"}),
+        json!({"resource":o.config.resource,"authorization_servers":[o.issuer],"scopes_supported":[SCOPE,"mail:reply"],"bearer_methods_supported":["header"],"resource_name":"Mailorva 邮件"}),
     )
 }
 async fn server_metadata(State(o): State<Arc<OAuth>>) -> Json<Value> {
@@ -508,7 +508,7 @@ async fn authorize(
         .await?;
     let action = html(&format!("{}/oauth/authorize", o.issuer));
     let page = format!(
-        r#"<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Email · 授权</title><style>body{{font:16px/1.7 system-ui,sans-serif;background:#f5f6f8;color:#20242a;margin:0;padding:32px 20px}}main{{max-width:480px;margin:5vh auto;padding:32px;background:white;border:1px solid #dde1e6;border-radius:16px}}h1{{font-size:24px}}p{{overflow-wrap:anywhere}}label{{display:block;font-weight:600}}input[type=password]{{box-sizing:border-box;width:100%;padding:12px;margin:8px 0 20px;border:1px solid #929aa5;border-radius:8px;font:inherit}}button{{font:inherit;padding:10px 18px;border:1px solid #ccd1d8;border-radius:8px;cursor:pointer}}button[value=approve]{{background:#2053c9;color:white;border-color:#2053c9}}small{{color:#586473}}</style><main><h1>{title}</h1><p><strong>{}</strong> 请求连接你的 AI Email。</p><p>{detail}授权最长保留 30 天。</p><p><small>授权后返回：{redirect}</small></p><form method="post" action="{action}"><input type="hidden" name="request_id" value="{id}"><label for="secret">授权口令</label><input id="secret" type="password" name="approval_secret" autocomplete="off" required maxlength="256"><p><small>使用部署时生成的 AI Email 专用授权口令，不是邮箱密码。口令只提交给此服务。</small></p><button name="decision" value="approve">{button}</button> <button name="decision" value="deny" formnovalidate>取消</button></form></main></html>"#,
+        r#"<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mailorva · 授权</title><style>body{{font:16px/1.7 system-ui,sans-serif;background:#f5f6f8;color:#20242a;margin:0;padding:32px 20px}}main{{max-width:480px;margin:5vh auto;padding:32px;background:white;border:1px solid #dde1e6;border-radius:16px}}h1{{font-size:24px}}p{{overflow-wrap:anywhere}}label{{display:block;font-weight:600}}input[type=password]{{box-sizing:border-box;width:100%;padding:12px;margin:8px 0 20px;border:1px solid #929aa5;border-radius:8px;font:inherit}}button{{font:inherit;padding:10px 18px;border:1px solid #ccd1d8;border-radius:8px;cursor:pointer}}button[value=approve]{{background:#2053c9;color:white;border-color:#2053c9}}small{{color:#586473}}</style><main><h1>{title}</h1><p><strong>{}</strong> 请求连接你的 Mailorva。</p><p>{detail}授权最长保留 30 天。</p><p><small>授权后返回：{redirect}</small></p><form method="post" action="{action}"><input type="hidden" name="request_id" value="{id}"><label for="secret">授权口令</label><input id="secret" type="password" name="approval_secret" autocomplete="off" required maxlength="256"><p><small>使用部署时生成的 Mailorva 专用授权口令，不是邮箱密码。口令只提交给此服务。</small></p><button name="decision" value="approve">{button}</button> <button name="decision" value="deny" formnovalidate>取消</button></form></main></html>"#,
         html(&client.name)
     );
     let mut response = Html(page).into_response();
@@ -747,7 +747,7 @@ impl IntoResponse for OAuthError {
         if self.0 == StatusCode::UNAUTHORIZED {
             r.headers_mut().insert(
                 header::WWW_AUTHENTICATE,
-                HeaderValue::from_static("Basic realm=\"AI Email OAuth\""),
+                HeaderValue::from_static("Basic realm=\"Mailorva OAuth\""),
             );
         }
         r

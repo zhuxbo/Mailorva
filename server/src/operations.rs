@@ -223,7 +223,7 @@ impl Service {
                 .unwrap_or_else(|| account.email.clone()),
         });
         let payload = serde_json::to_string(&input)?;
-        let message_id = format!("<{}@ai-email.local>", uuid::Uuid::new_v4());
+        let message_id = format!("<{}@mailorva.local>", uuid::Uuid::new_v4());
         sqlx::query("INSERT INTO send_operations(id,payload,payload_hash,message_id,status,created_at) VALUES(?,?,?,?,'prepared',?) ON CONFLICT(id) DO NOTHING").bind(&input.operation_id).bind(&payload).bind(&hash).bind(message_id).bind(crate::model::now()).execute(&self.db.pool).await?;
         let row = sqlx::query("SELECT payload_hash FROM send_operations WHERE id=?")
             .bind(&input.operation_id)

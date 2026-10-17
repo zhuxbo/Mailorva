@@ -1,8 +1,8 @@
 {
   "bind": "127.0.0.1:8080",
-  "database_path": "/var/lib/ai-email/mail.db",
-  "read_token": { "file": "/etc/ai-email/read-token" },
-  "write_token": { "file": "/etc/ai-email/write-token" },
+  "database_path": "/var/lib/mailorva/mail.db",
+  "read_token": { "file": "/etc/mailorva/read-token" },
+  "write_token": { "file": "/etc/mailorva/write-token" },
   "oauth": null,
   "allowed_origins": [],
   "allowed_hosts": ["mail.example.com", "127.0.0.1", "localhost"],

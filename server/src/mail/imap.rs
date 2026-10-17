@@ -219,7 +219,7 @@ async fn connect(account: &MailAccount) -> Result<Connection, MailError> {
             .has_str("ID")
         {
             session
-                .run_command_and_check_ok(r#"ID ("name" "ai-email-server" "version" "0.1.0")"#)
+                .run_command_and_check_ok(r#"ID ("name" "mailorva-server" "version" "0.1.0")"#)
                 .await
                 .map_err(|_| unavailable())?;
         }
