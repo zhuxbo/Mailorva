@@ -1000,6 +1000,7 @@ async fn oauth_reply_requires_human_confirmation_and_sends_once() {
     let url = preview["confirmation_url"].as_str().unwrap();
     let path = url.strip_prefix(RESOURCE.trim_end_matches('/')).unwrap();
     let (nonce, cookie, body) = f.confirmation(path).await;
+    assert!(!body.contains("name=\"approval_secret\""));
     assert!(body.contains("&lt;script&gt;"));
     assert!(!body.contains("<script>"));
     assert!(body.contains("alias@example.com") && body.contains("vendor@example.com"));
@@ -1008,11 +1009,7 @@ async fn oauth_reply_requires_human_confirmation_and_sends_once() {
         ("cookie", cookie.as_str()),
         ("content-type", "application/x-www-form-urlencoded"),
     ];
-    let form_body = form(&[
-        ("request_id", &nonce),
-        ("approval_secret", APPROVAL),
-        ("decision", "send"),
-    ]);
+    let form_body = form(&[("request_id", &nonce), ("decision", "send")]);
     let (s, _, body) = f.request("POST", path, &headers, form_body.clone()).await;
     assert_eq!(s, StatusCode::OK, "{body}");
     assert!(body.contains("回复已发送"));
@@ -1038,10 +1035,10 @@ async fn oauth_reply_rejects_bypass_cross_grant_and_revoked_confirmation() {
         .unwrap()
         .strip_prefix(RESOURCE.trim_end_matches('/'))
         .unwrap();
-    for (origin, secret, cookie_valid) in [
-        ("https://evil.example", APPROVAL, true),
-        ("https://mail.example.com", "wrong", true),
-        ("https://mail.example.com", APPROVAL, false),
+    for (origin, cookie_valid, decision) in [
+        ("https://evil.example", true, "send"),
+        ("https://mail.example.com", true, "cancel"),
+        ("https://mail.example.com", false, "send"),
     ] {
         let (nonce, cookie, _) = f.confirmation(path).await;
         let (status, _, _) = f
@@ -1053,11 +1050,7 @@ async fn oauth_reply_rejects_bypass_cross_grant_and_revoked_confirmation() {
                     ("cookie", if cookie_valid { &cookie } else { "" }),
                     ("content-type", "application/x-www-form-urlencoded"),
                 ],
-                form(&[
-                    ("request_id", &nonce),
-                    ("approval_secret", secret),
-                    ("decision", "send"),
-                ]),
+                form(&[("request_id", &nonce), ("decision", decision)]),
             )
             .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -1102,11 +1095,7 @@ async fn oauth_reply_rejects_bypass_cross_grant_and_revoked_confirmation() {
                 ("cookie", &cookie),
                 ("content-type", "application/x-www-form-urlencoded"),
             ],
-            form(&[
-                ("request_id", &nonce),
-                ("approval_secret", APPROVAL),
-                ("decision", "send"),
-            ]),
+            form(&[("request_id", &nonce), ("decision", "send")]),
         )
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -1149,11 +1138,7 @@ async fn oauth_reply_expiry_and_changed_payload_block_send() {
                     ("cookie", &cookie),
                     ("content-type", "application/x-www-form-urlencoded"),
                 ],
-                form(&[
-                    ("request_id", &nonce),
-                    ("approval_secret", APPROVAL),
-                    ("decision", "send"),
-                ]),
+                form(&[("request_id", &nonce), ("decision", "send")]),
             )
             .await;
         assert_eq!(status, expected);
@@ -1183,7 +1168,6 @@ async fn oauth_reply_revoked_while_waiting_for_account_lock_cannot_send() {
         .header("content-type", "application/x-www-form-urlencoded")
         .body(Body::from(form(&[
             ("request_id", &nonce),
-            ("approval_secret", APPROVAL),
             ("decision", "send"),
         ])))
         .unwrap();

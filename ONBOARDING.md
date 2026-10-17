@@ -106,7 +106,7 @@ sudo chmod 0640 /etc/ai-email/oauth-approval-secret
 
 `allowed_redirect_origins` 只填写可信助手实际回调的 HTTPS 来源（协议、主机、可选端口），不使用通配符。动态注册只能提交这些来源的回调；注册后按完整回调 URL 精确匹配。客户端标识由服务签名，无匿名注册表；服务不会抓取客户端传入的 URL。其他助手需要将其可信回调来源加入配置后重启；不支持 HTTP loopback 回调。
 
-公开路由为 `/.well-known/oauth-protected-resource`、`/.well-known/oauth-authorization-server`、`/oauth/register`、`/oauth/authorize`、`/oauth/token`、`/oauth/revoke`、`/oauth/replies/{id}`。它们不使用固定 Bearer 认证，实际授权仍必须通过独立口令和用户确认；MCP 邮件请求始终需要有效令牌。服务监听地址继续保持 loopback。
+公开路由为 `/.well-known/oauth-protected-resource`、`/.well-known/oauth-authorization-server`、`/oauth/register`、`/oauth/authorize`、`/oauth/token`、`/oauth/revoke`、`/oauth/replies/{id}`。它们不使用固定 Bearer 认证，连接授权仍必须通过独立口令和用户确认，回复发送由用户在独立确认页点击按钮确认；MCP 邮件请求始终需要有效令牌。服务监听地址继续保持 loopback。
 
 若公网入口采用子路径（例如 `/mail-mcp/`），应让反代剥除此前缀，再将入口 `/` 重写为后端 `/mcp`，同时转发该前缀下的 OAuth 和 metadata 路由。此时 `issuer` 为 `https://mail.example.com/mail-mcp`，`resource` 为 `https://mail.example.com/mail-mcp/`。RFC 8414 发现请求从域名根发出，还需在公网 Nginx 增加精确路由（替换上游与 Host）：
 
@@ -130,7 +130,7 @@ location = /.well-known/oauth-authorization-server/mail-mcp {
 回复授权仅增加 `prepare_reply` 和 `get_reply_status`：
 
 - `prepare_reply` 提交原邮件 `id`、唯一 `operation_id`、`body_text` 及可选 `from_address`。服务端固定原账号、Reply-To（无则 From）收件人和回复主题，发件人只能是账号主地址或已配置别名；不能添加抄送或任意收件人。
-- 返回完整预览和 `confirmation_url`。助手应把链接交给用户本人；用户在独立页面核对完整内容，输入部署时生成的专用授权口令并点击“确认发送这封回复”。此点击立即发送，助手不得代为确认或获取口令。MCP 没有可绕过页面的 OAuth 发送工具。
+- 返回完整预览和 `confirmation_url`。助手应把链接交给用户本人；用户在独立页面核对完整内容，无需再次输入授权口令，点击“确认发送这封回复”。此点击立即发送，助手不得代为确认。确认链接应仅由用户本人打开，不要转发。MCP 没有可绕过页面的 OAuth 发送工具。
 - 回复自准备起 30 分钟有效，页面确认凭证 10 分钟有效且一次使用。修改正文需新操作编号并重新确认；相同编号不能换内容。不同 OAuth 授权的操作互相隔离，授权撤销或过期后不能确认发送。
 - `get_reply_status` 用原 `operation_id` 查询状态；`unknown` 必须人工检查发件箱，不得自动重发。`list_accounts` 返回 `can_reply` 表示 OAuth 回复能力，`can_write` 仍为 false。
 

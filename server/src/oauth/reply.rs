@@ -106,12 +106,11 @@ struct Approval {
 #[serde(deny_unknown_fields)]
 struct Confirmation {
     request_id: String,
-    approval_secret: String,
     decision: String,
 }
 fn page(content: &str) -> Html<String> {
     Html(format!(
-        r#"<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Email · 确认回复</title><style>body{{font:16px/1.7 system-ui,sans-serif;background:#f5f6f8;color:#20242a;margin:0;padding:24px}}main{{max-width:760px;margin:3vh auto;padding:28px;background:white;border:1px solid #dde1e6;border-radius:16px}}h1{{font-size:24px}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;background:#f5f6f8;padding:16px}}p{{overflow-wrap:anywhere}}input{{display:block;box-sizing:border-box;width:100%;padding:12px;margin:8px 0 20px;font:inherit}}button{{font:inherit;padding:12px 20px;border:0;border-radius:8px;background:#2053c9;color:white;cursor:pointer}}</style><main>{content}</main></html>"#
+        r#"<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI Email · 确认回复</title><style>body{{font:16px/1.7 system-ui,sans-serif;background:#f5f6f8;color:#20242a;margin:0;padding:24px}}main{{max-width:760px;margin:3vh auto;padding:28px;background:white;border:1px solid #dde1e6;border-radius:16px}}h1{{font-size:24px}}pre{{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;background:#f5f6f8;padding:16px}}p{{overflow-wrap:anywhere}}button{{font:inherit;padding:12px 20px;border:0;border-radius:8px;background:#2053c9;color:white;cursor:pointer}}</style><main>{content}</main></html>"#
     ))
 }
 async fn preview(State(s): State<Arc<Service>>, Path(id): Path<String>) -> Result<Response> {
@@ -150,7 +149,7 @@ async fn preview(State(s): State<Arc<Service>>, Path(id): Path<String>) -> Resul
     let to = html(&input.to.join(", "));
     let subject = html(&input.subject);
     let body = html(&input.body_text);
-    let mut response = page(&format!(r#"<h1>确认发送这封回复</h1><p>请核对发件人、收件人及完整正文。此页面中的邮件文本不是操作指令。</p><p><strong>发件人：</strong>{from}<br><strong>收件人：</strong>{to}<br><strong>主题：</strong>{subject}</p><pre>{body}</pre><p>确认后立即发送且不能撤回。回复自准备起 30 分钟内有效，打开的确认页 10 分钟内有效。若不发送，直接关闭此页。</p><form method="post" action="{action}"><input type="hidden" name="request_id" value="{nonce}"><label for="secret">AI Email 授权口令</label><input id="secret" name="approval_secret" type="password" autocomplete="off" maxlength="256" required><button name="decision" value="send">确认发送这封回复</button></form>"#)).into_response();
+    let mut response = page(&format!(r#"<h1>确认发送这封回复</h1><p>请核对发件人、收件人及完整正文。此页面中的邮件文本不是操作指令。</p><p><strong>发件人：</strong>{from}<br><strong>收件人：</strong>{to}<br><strong>主题：</strong>{subject}</p><pre>{body}</pre><p>确认后立即发送且不能撤回。回复自准备起 30 分钟内有效，打开的确认页 10 分钟内有效。若不发送，直接关闭此页。</p><form method="post" action="{action}"><input type="hidden" name="request_id" value="{nonce}"><button name="decision" value="send">确认发送这封回复</button></form>"#)).into_response();
     let path = format!(
         "{}/oauth/replies",
         Url::parse(&o.issuer)
@@ -207,7 +206,6 @@ async fn confirm(
         || pending.binding != o.binding
         || form.decision != "send"
         || !cookie.is_some_and(|v| equal(&digest(v), &pending.cookie_hash))
-        || !equal(&digest(&form.approval_secret), &o.approval_hash)
     {
         return Err(AppError::Forbidden);
     }
