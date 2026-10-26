@@ -1484,6 +1484,15 @@ async fn reply_status_separates_confirmation_expiry_without_writing() {
 
 #[tokio::test]
 async fn revoked_oauth_grant_removes_queued_event_subscription() {
+    check_revoked_event_subscription(true).await;
+}
+
+#[tokio::test]
+async fn revoked_oauth_grant_removes_idle_permanent_subscription() {
+    check_revoked_event_subscription(false).await;
+}
+
+async fn check_revoked_event_subscription(queued: bool) {
     let f = Fixture::new().await;
     let client = f.register().await;
     let code = f.code(&client).await;
@@ -1504,17 +1513,19 @@ async fn revoked_oauth_grant_removes_queued_event_subscription() {
     sqlx::query("INSERT INTO event_subscriptions(id,owner,callback,secret,verified_at,created_at,expires_at) VALUES(?,?,?,?,?,?,?)")
         .bind("sub_revoked").bind(format!("oauth:{family}")).bind("https://127.0.0.1/callback")
         .bind("whsec_YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=")
-        .bind(now()).bind(now()-10).bind(now()+3600).execute(&f.service.db.pool).await.unwrap();
-    f.service
-        .db
-        .put("a", "me@example.com", "INBOX", 1, mail(99, "test", now()))
-        .await
-        .unwrap();
+        .bind(now()).bind(now()-10).bind(i64::MAX).execute(&f.service.db.pool).await.unwrap();
+    if queued {
+        f.service
+            .db
+            .put("a", "me@example.com", "INBOX", 1, mail(99, "test", now()))
+            .await
+            .unwrap();
+    }
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM event_deliveries")
         .fetch_one(&f.service.db.pool)
         .await
         .unwrap();
-    assert_eq!(count, 1);
+    assert_eq!(count, i64::from(queued));
     let (status, _, _) = f
         .request(
             "POST",

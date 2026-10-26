@@ -164,7 +164,7 @@ location = /.well-known/oauth-authorization-server/mail-mcp {
 2. 告诉 dots：“监控 Mailorva 新邮件，收到后判断是否需要处理，需要回复时准备草稿并通知我。”也可限定账号 ID 和文件夹。
 3. dots 调用 `events/subscribe` 并提供回调 URL 与 `whsec_` 签名密钥；服务完成签名挑战验证后才保存订阅。只读固定令牌及 OAuth `mail:read` 均可订阅，订阅不增加邮箱写入权限。
 4. 收到新的匹配邮件后，确认接收方收到事件并按要求处理。事件的 `message_id` 用于 `get_message`，不是原邮件的 RFC Message-ID。
-5. 告诉 dots 停止监控，通过 `events/unsubscribe` 取消；订阅最长 24 小时，客户端需按 `refreshBefore` 续订。
+5. 告诉 dots 停止监控，通过 `events/unsubscribe` 取消。省略 `ttlMs` 或传 `null` 默认永久订阅，服务返回 `refreshBefore: null`；显式数字仍授予 1 秒至 24 小时，并需按有限 `refreshBefore` 续订。升级后让客户端重新提交原订阅以转换为永久，不直接修改数据库。永久订阅不绕过授权撤销/失效、账号或文件夹过滤失效以及 HTTP 410 清理；网络暂时失败仅重试事件并记录警告，不删除订阅。
 
 公开接口仍为原 MCP 地址，Events 不新增 OAuth scope。`server/discover` 使用 MCP `2026-07-28` 的逐请求元数据和对应 HTTP 头；事件声明、订阅和回调格式参见 [官方接入协议](https://developers.openai.com/plugins/build/mcp-events)。其他助手需实现相同的 Webhook 订阅、挑战验证和 Standard Webhooks 验签；仅连接现有搜索工具不足以接收事件。
 

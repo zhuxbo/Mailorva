@@ -355,11 +355,148 @@ async fn terminal_http_errors_and_exhausted_retries_do_not_loop() {
             f.s.events.deliver_pending(&f.s).await.unwrap();
         }
         assert_eq!(f.pending().await, 0);
+        let subscriptions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM event_subscriptions")
+            .fetch_one(&f.s.db.pool)
+            .await
+            .unwrap();
+        assert_eq!(subscriptions, if status == 410 { 0 } else { 1 });
         assert_eq!(
             f.receiver.events.lock().unwrap().len(),
             if status == 503 { 6 } else { 1 }
         );
     }
+}
+
+#[tokio::test]
+async fn permanent_subscription_defaults_null_and_survives_restart() {
+    for explicit_null in [false, true] {
+        let f = Fixture::new().await;
+        let mut input = f.input(json!({}));
+        if explicit_null {
+            input["ttlMs"] = Value::Null;
+        }
+        let response =
+            f.s.events
+                .request(&f.s, &f.access(), "events/subscribe", input)
+                .await
+                .unwrap();
+        assert_eq!(response.get("refreshBefore"), Some(&Value::Null));
+        let expires: i64 = sqlx::query_scalar("SELECT expires_at FROM event_subscriptions")
+            .fetch_one(&f.s.db.pool)
+            .await
+            .unwrap();
+        assert_eq!(expires, i64::MAX);
+        let mut restarted = Service::new(f.s.config.clone(), Arc::new(Mail))
+            .await
+            .unwrap();
+        Arc::get_mut(&mut restarted).unwrap().events = Arc::new(Events {
+            wake: Notify::new(),
+            gate: Mutex::new(HashMap::new()),
+            webhook: f.receiver.clone(),
+        });
+        f.put("a", "INBOX", 1, now() + 2 * 86400).await;
+        restarted.events.deliver_pending(&restarted).await.unwrap();
+        assert_eq!(f.receiver.events.lock().unwrap().len(), 1);
+        assert_eq!(f.pending().await, 0);
+    }
+}
+
+#[tokio::test]
+async fn finite_subscription_can_be_converted_to_permanent_without_replaying() {
+    let f = Fixture::new().await;
+    let mut input = f.input(json!({}));
+    input["ttlMs"] = json!(60_000);
+    let first =
+        f.s.events
+            .request(&f.s, &f.access(), "events/subscribe", input.clone())
+            .await
+            .unwrap();
+    assert!(first["refreshBefore"].is_string());
+    let original: i64 = sqlx::query_scalar("SELECT created_at FROM event_subscriptions")
+        .fetch_one(&f.s.db.pool)
+        .await
+        .unwrap();
+    f.put("a", "INBOX", 1, now()).await;
+    input["ttlMs"] = Value::Null;
+    let second =
+        f.s.events
+            .request(&f.s, &f.access(), "events/subscribe", input.clone())
+            .await
+            .unwrap();
+    assert_eq!(first["id"], second["id"]);
+    assert_eq!(second.get("refreshBefore"), Some(&Value::Null));
+    let created: i64 = sqlx::query_scalar("SELECT created_at FROM event_subscriptions")
+        .fetch_one(&f.s.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(created, original);
+    assert_eq!(f.pending().await, 1);
+    f.s.events
+        .request(&f.s, &f.access(), "events/unsubscribe", input)
+        .await
+        .unwrap();
+    assert_eq!(f.pending().await, 0);
+}
+
+#[tokio::test]
+async fn finite_ttl_still_validates_and_caps_requested_duration() {
+    let f = Fixture::new().await;
+    for ttl in [json!(0), json!(999), json!(-1), json!("forever")] {
+        let mut input = f.input(json!({}));
+        input["ttlMs"] = ttl;
+        assert!(f
+            .s
+            .events
+            .request(&f.s, &f.access(), "events/subscribe", input)
+            .await
+            .is_err());
+    }
+    for ttl in [1000_u64, 60_000, u64::MAX] {
+        let start = now();
+        let mut input = f.input(json!({}));
+        input["ttlMs"] = json!(ttl);
+        let response =
+            f.s.events
+                .request(&f.s, &f.access(), "events/subscribe", input)
+                .await
+                .unwrap();
+        let expires: i64 = sqlx::query_scalar("SELECT expires_at FROM event_subscriptions")
+            .fetch_one(&f.s.db.pool)
+            .await
+            .unwrap();
+        let granted = (ttl.min(86_400_000) / 1000) as i64;
+        assert!((start + granted..=now() + granted).contains(&expires));
+        assert_eq!(response["refreshBefore"], timestamp(expires));
+    }
+}
+
+#[tokio::test]
+async fn inactive_owners_are_cleaned_even_without_pending_mail() {
+    let f = Fixture::new().await;
+    f.subscribe(json!({})).await;
+    std::fs::write(f._temp.path().join("read"), "x".repeat(32)).unwrap();
+    f.s.events.deliver_pending(&f.s).await.unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM event_subscriptions")
+        .fetch_one(&f.s.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 0);
+    assert!(f.receiver.events.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn removed_filter_is_cleaned_without_deleting_unfiltered_subscription() {
+    let f = Fixture::new().await;
+    f.subscribe(json!({"account_id":"a","folder":"INBOX"}))
+        .await;
+    let unfiltered = f.subscribe(json!({})).await;
+    f.s.delete_account("a").await.unwrap();
+    f.s.events.deliver_pending(&f.s).await.unwrap();
+    let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM event_subscriptions")
+        .fetch_all(&f.s.db.pool)
+        .await
+        .unwrap();
+    assert_eq!(ids, vec![unfiltered["id"].as_str().unwrap()]);
 }
 
 #[tokio::test]

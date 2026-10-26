@@ -194,6 +194,8 @@ mod tests {
     use serde_json::{json, Value};
     use std::sync::Arc;
 
+    type ReceivedRequests = Arc<tokio::sync::Mutex<Vec<(HeaderMap, String)>>>;
+
     #[test]
     fn callback_destinations_reject_local_special_and_embedded_addresses() {
         for ip in [
@@ -245,7 +247,7 @@ mod tests {
             .route(
                 "/callback",
                 post(
-                    |State(seen): State<Arc<tokio::sync::Mutex<Vec<(HeaderMap, String)>>>>,
+                    |State(seen): State<ReceivedRequests>,
                      headers: HeaderMap,
                      body: String| async move {
                         seen.lock().await.push((headers, body.clone()));

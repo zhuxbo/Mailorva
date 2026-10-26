@@ -18,7 +18,9 @@ use tokio_util::sync::CancellationToken;
 use webhook::{CallbackError, Delivery, HttpsWebhook, Webhook};
 
 const EVENT: &str = "mail.received";
-const DEFAULT_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+const MAX_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+// Preserve the existing NOT NULL schema and expiry comparisons, including on rollback.
+const NEVER_EXPIRES: i64 = i64::MAX;
 const MAX_ATTEMPTS: i64 = 6;
 
 pub struct Events {
@@ -215,8 +217,8 @@ impl Events {
             .secret
             .filter(|s| webhook::key(s).is_some())
             .ok_or_else(invalid)?;
-        let lifetime = input.ttl_ms.unwrap_or(DEFAULT_TTL_MS).min(DEFAULT_TTL_MS);
-        if lifetime < 1000 {
+        let lifetime = input.ttl_ms.map(|ttl| ttl.min(MAX_TTL_MS));
+        if lifetime.is_some_and(|ttl| ttl < 1000) {
             return Err(invalid());
         }
         let accounts = s.account_settings().await.map_err(internal)?;
@@ -300,7 +302,7 @@ impl Events {
         if !owner_active(s, &owner).await.map_err(internal)? {
             return Err(invalid());
         }
-        let expires = now() + (lifetime / 1000) as i64;
+        let expires = lifetime.map_or(NEVER_EXPIRES, |ttl| now() + (ttl / 1000) as i64);
         // Expired subscriptions start a fresh observation window and discard old pending deliveries.
         let removed = sqlx::query("DELETE FROM event_subscriptions WHERE id=? AND expires_at<=?")
             .bind(&id)
@@ -320,7 +322,9 @@ impl Events {
             .bind(&id).bind(owner).bind(input.arguments.account_id).bind(input.arguments.folder).bind(url).bind(secret)
             .bind(verified.unwrap_or_else(now)).bind(now()).bind(expires).execute(&s.db.pool).await.map_err(internal)?;
         drop(guard);
-        Ok(json!({"id":id,"refreshBefore":timestamp(expires),"cursor":null,"truncated":false}))
+        let refresh_before = lifetime.map(|_| timestamp(expires));
+        tracing::info!(subscription_id = %id, permanent = refresh_before.is_none(), "事件订阅已建立或更新");
+        Ok(json!({"id":id,"refreshBefore":refresh_before,"cursor":null,"truncated":false}))
     }
 
     pub async fn run(self: Arc<Self>, s: Arc<Service>, cancel: CancellationToken) {
@@ -348,15 +352,34 @@ impl Events {
     async fn deliver_pending(&self, s: &Service) -> crate::error::Result<()> {
         {
             let mut guard = self.gate.lock().await;
-            let expired: Vec<String> = sqlx::query_scalar(
-                "DELETE FROM event_subscriptions WHERE expires_at<=? RETURNING id",
+            // Permanent subscriptions need invalidation even when no new mail is queued.
+            let subscriptions = sqlx::query(
+                "SELECT id,owner,account_id,folder,expires_at FROM event_subscriptions",
             )
-            .bind(now())
             .fetch_all(&s.db.pool)
             .await?;
-            for id in expired {
-                if let Some(state) = guard.remove(&id) {
-                    state.cancel.cancel();
+            let accounts = s.account_settings().await?;
+            for row in subscriptions {
+                let account: Option<String> = row.get("account_id");
+                let folder: Option<String> = row.get("folder");
+                let configured = (account.is_none() && folder.is_none())
+                    || accounts.iter().any(|a| {
+                        account.as_ref().is_none_or(|id| id == &a.id)
+                            && folder.as_ref().is_none_or(|f| a.folders.contains(f))
+                    });
+                if row.get::<i64, _>("expires_at") <= now()
+                    || !configured
+                    || !owner_active(s, &row.get::<String, _>("owner")).await?
+                {
+                    let id: String = row.get("id");
+                    sqlx::query("DELETE FROM event_subscriptions WHERE id=?")
+                        .bind(&id)
+                        .execute(&s.db.pool)
+                        .await?;
+                    if let Some(state) = guard.remove(&id) {
+                        state.cancel.cancel();
+                    }
+                    tracing::info!(subscription_id = %id, "失效事件订阅已清理");
                 }
             }
             sqlx::query(
@@ -480,7 +503,15 @@ impl Events {
                         subscription_id = subscription,
                         status,
                         attempts,
+                        reason = result.as_ref().err().map(|e| e.reason()),
                         "事件投递终止"
+                    );
+                } else {
+                    tracing::info!(
+                        event_id,
+                        subscription_id = subscription,
+                        status,
+                        "事件投递成功"
                     );
                 }
                 self.remove_delivery(s, &event_id, subscription).await?;
